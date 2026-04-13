@@ -730,6 +730,150 @@ html, body {
     border: 1px solid rgba(45, 138, 78, 0.2);
 }
 
+/* ── Tool Detail Card ── */
+.tool-detail-card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    margin-bottom: 6px;
+    overflow: hidden;
+    animation: fade-in 0.25s ease;
+}
+
+.tool-detail-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 12px;
+    cursor: pointer;
+    font-size: 12px;
+    font-family: var(--font-mono);
+    user-select: none;
+    transition: background var(--transition);
+}
+.tool-detail-header:hover {
+    background: var(--bg-hover);
+}
+
+.tool-detail-icon {
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.tool-detail-icon svg { width: 14px; height: 14px; }
+
+.tool-detail-label {
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: capitalize;
+    flex-shrink: 0;
+}
+
+.tool-detail-path {
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text-dim);
+    font-size: 11px;
+    min-width: 0;
+}
+
+.tool-detail-badge {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    font-weight: 500;
+    flex-shrink: 0;
+}
+.badge-new { background: var(--green-bg); color: var(--green); }
+.badge-modified { background: var(--blue-bg); color: var(--blue); }
+.badge-add { background: var(--green-bg); color: var(--green); }
+.badge-del { background: var(--red-bg); color: var(--red); }
+
+.tool-detail-chevron {
+    flex-shrink: 0;
+    transition: transform 0.2s;
+    color: var(--text-dim);
+}
+.tool-detail-card.open .tool-detail-chevron {
+    transform: rotate(180deg);
+}
+
+.tool-detail-body {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease;
+}
+.tool-detail-card.open .tool-detail-body {
+    max-height: 500px;
+    overflow-y: auto;
+    border-top: 1px solid var(--border-subtle);
+}
+.tool-detail-body::-webkit-scrollbar { width: 4px; }
+.tool-detail-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+.tool-detail-content {
+    padding: 10px 14px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--text-secondary);
+    background: var(--bg-secondary);
+}
+
+.tool-detail-command {
+    padding: 6px 14px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text);
+    background: var(--bg-raised);
+    border-bottom: 1px solid var(--border-subtle);
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+.tool-detail-command .dollar {
+    color: var(--text-dim);
+    margin-right: 4px;
+}
+
+.tool-detail-output {
+    padding: 10px 14px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--text-secondary);
+    background: var(--bg-secondary);
+}
+
+.tool-detail-exit {
+    padding: 4px 14px 6px;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    color: var(--text-dim);
+    border-top: 1px solid var(--border-subtle);
+}
+
+.diff-line {
+    padding: 1px 14px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+.diff-line-added { background: var(--green-bg); color: var(--green); }
+.diff-line-removed { background: var(--red-bg); color: var(--red); }
+.diff-line-context { color: var(--text-dim); }
+.diff-line-header { color: var(--accent); font-weight: 600; }
+
 /* ── Question Card ── */
 .question-card {
     background: #fffbf0;

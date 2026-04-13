@@ -158,8 +158,10 @@ class SkillManager:
     # ── 创建 ──────────────────────────────────────────
 
     async def create_skill(self, user_message: str) -> Skill:
+        # 用数字递增命名目录：001、002、003 ...
+        seq = _next_skill_seq()
         skill = Skill(
-            name=_extract_skill_name(user_message),
+            name=f"{seq:03d}",
             description=user_message[:100],
             status=SkillStatus.CREATING,
         )
@@ -197,6 +199,7 @@ class SkillManager:
 
         full_response = ""
         full_thinking = ""
+        full_tool_details: list[dict] = []  # 收集工具详情
         thinking_has_content = False  # 追踪当前思考轮次是否已有内容
         try:
             async for chunk in self._stream_from_opencode(skill, user_message):
@@ -217,6 +220,9 @@ class SkillManager:
                     yield chunk
                 elif chunk.get("type") == "tool_status":
                     yield chunk
+                elif chunk.get("type") == "tool_detail":
+                    full_tool_details.append(chunk)
+                    yield chunk
                 elif chunk.get("type") == "status":
                     yield chunk
                 elif chunk.get("type") == "error":
@@ -229,7 +235,7 @@ class SkillManager:
 
         if full_response:
             skill.messages.append(
-                Message(role=MessageRole.ASSISTANT, content=full_response, thinking=full_thinking)
+                Message(role=MessageRole.ASSISTANT, content=full_response, thinking=full_thinking, tool_details=full_tool_details)
             )
 
         skill.status = SkillStatus.ACTIVE
@@ -396,6 +402,66 @@ class SkillManager:
                                 output = state.get("output", "")
                                 short_output = output[:80] if output else "完成"
                                 yield {"type": "tool_status", "tool": tool_name, "status": "completed", "detail": short_output}
+
+                                # 🔑 提取工具详情，供前端展示
+                                tool_input = state.get("input", {})
+                                metadata = state.get("metadata", {})
+                                title = state.get("title", "")
+                                tn = tool_name.lower()
+
+                                if tn == "write":
+                                    content = tool_input.get("content", "")
+                                    if len(content) > 10000:
+                                        content = content[:10000] + "\n... (已截断)"
+                                    yield {
+                                        "type": "tool_detail",
+                                        "tool": "write",
+                                        "filePath": tool_input.get("filePath", "") or metadata.get("filepath", ""),
+                                        "content": content,
+                                        "isNew": not metadata.get("exists", True),
+                                        "title": title,
+                                    }
+                                elif tn == "bash":
+                                    cmd = tool_input.get("command", "")
+                                    out = output or metadata.get("output", "")
+                                    if len(out) > 5000:
+                                        out = out[:5000] + "\n... (已截断)"
+                                    yield {
+                                        "type": "tool_detail",
+                                        "tool": "bash",
+                                        "command": cmd,
+                                        "output": out,
+                                        "exitCode": metadata.get("exit", 0),
+                                        "title": title,
+                                    }
+                                elif tn == "read":
+                                    yield {
+                                        "type": "tool_detail",
+                                        "tool": "read",
+                                        "filePath": tool_input.get("filePath", ""),
+                                        "title": title,
+                                    }
+                                elif tn == "edit":
+                                    filediff = metadata.get("filediff", {})
+                                    yield {
+                                        "type": "tool_detail",
+                                        "tool": "edit",
+                                        "filePath": tool_input.get("filePath", "") or metadata.get("filepath", ""),
+                                        "diff": metadata.get("diff", ""),
+                                        "additions": filediff.get("additions", 0),
+                                        "deletions": filediff.get("deletions", 0),
+                                        "title": title,
+                                    }
+                                else:
+                                    # 其他工具通用详情
+                                    if output:
+                                        yield {
+                                            "type": "tool_detail",
+                                            "tool": tool_name,
+                                            "output": output[:500],
+                                            "title": title,
+                                        }
+
                             elif tool_status == "running":
                                 if tool_name == "question":
                                     yield {"type": "tool_status", "tool": tool_name, "status": "running", "detail": "等待用户输入"}
@@ -527,6 +593,16 @@ class SkillManager:
     def get_messages(self, skill_id: str) -> list[Message]:
         skill = self._skills.get(skill_id)
         return skill.messages if skill else []
+
+
+def _next_skill_seq() -> int:
+    """扫描 skills 目录，返回下一个可用编号。"""
+    max_seq = 0
+    if SKILLS_DIR.exists():
+        for d in SKILLS_DIR.iterdir():
+            if d.is_dir() and d.name.isdigit():
+                max_seq = max(max_seq, int(d.name))
+    return max_seq + 1
 
 
 def _extract_skill_name(message: str) -> str:

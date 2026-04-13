@@ -25,6 +25,7 @@ class Message(BaseModel):
     role: MessageRole
     content: str
     thinking: str = ""  # 思考内容（仅 assistant 消息）
+    tool_details: list[dict] = Field(default_factory=list)  # 工具执行详情
     timestamp: datetime = Field(default_factory=datetime.now)
 
 

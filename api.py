@@ -98,6 +98,7 @@ async def get_skill(skill_id: str):
                 "role": m.role.value,
                 "content": m.content,
                 "thinking": m.thinking,
+                "tool_details": m.tool_details,
                 "timestamp": m.timestamp.isoformat(),
             }
             for m in skill.messages
@@ -272,6 +273,7 @@ async def get_messages(skill_id: str):
             "role": m.role.value,
             "content": m.content,
             "thinking": m.thinking,
+            "tool_details": m.tool_details,
             "timestamp": m.timestamp.isoformat(),
         }
         for m in messages

@@ -221,6 +221,9 @@ function handleWSMessage(data) {
     else if (data.type === 'tool_status') {
         handleToolStatus(data);
     }
+    else if (data.type === 'tool_detail') {
+        handleToolDetail(data);
+    }
     else if (data.type === 'question') {
         handleQuestion(data);
     }
@@ -351,6 +354,147 @@ function handleToolStatus(data) {
 
     resp.toolBar.appendChild(item);
     scrollToBottom();
+}
+
+// ── Tool Detail 卡片 ─────────────────────────────────
+var TOOL_ICONS = {
+    write: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>',
+    bash: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>',
+    read: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>',
+    edit: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>'
+};
+
+function buildToolDetailCard(data) {
+    var tool = (data.tool || '').toLowerCase();
+    var card = document.createElement('div');
+    card.className = 'tool-detail-card';
+
+    // ── 头部 ──
+    var header = document.createElement('div');
+    header.className = 'tool-detail-header';
+    var iconSvg = TOOL_ICONS[tool] || TOOL_ICONS.bash;
+    var label = tool;
+    var pathText = '';
+    var badges = '';
+
+    if (tool === 'write') {
+        pathText = data.filePath || data.title || '';
+        var shortName = pathText.split('/').pop() || pathText;
+        label = shortName;
+        badges = data.isNew
+            ? '<span class="tool-detail-badge badge-new">new</span>'
+            : '<span class="tool-detail-badge badge-modified">modified</span>';
+    } else if (tool === 'bash') {
+        pathText = data.command ? (data.command.length > 60 ? data.command.substring(0, 60) + '...' : data.command) : '';
+    } else if (tool === 'read') {
+        pathText = data.filePath || data.title || '';
+    } else if (tool === 'edit') {
+        pathText = data.filePath || data.title || '';
+        if (data.additions || data.deletions) {
+            if (data.additions) badges += '<span class="tool-detail-badge badge-add">+' + data.additions + '</span>';
+            if (data.deletions) badges += '<span class="tool-detail-badge badge-del">-' + data.deletions + '</span>';
+        }
+    } else {
+        pathText = data.title || '';
+    }
+
+    header.innerHTML =
+        '<span class="tool-detail-icon">' + iconSvg + '</span>' +
+        '<span class="tool-detail-label">' + escapeHtml(label) + '</span>' +
+        (pathText && tool !== 'write' ? '<span class="tool-detail-path">' + escapeHtml(pathText) + '</span>' : '') +
+        badges +
+        '<span class="tool-detail-chevron"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg></span>';
+
+    card.appendChild(header);
+
+    // ── 可折叠内容 ──
+    var body = document.createElement('div');
+    body.className = 'tool-detail-body';
+
+    if (tool === 'write' && data.content) {
+        var contentEl = document.createElement('div');
+        contentEl.className = 'tool-detail-content';
+        contentEl.textContent = data.content;
+        body.appendChild(contentEl);
+    } else if (tool === 'bash') {
+        if (data.command) {
+            var cmdEl = document.createElement('div');
+            cmdEl.className = 'tool-detail-command';
+            cmdEl.innerHTML = '<span class="dollar">$</span>' + escapeHtml(data.command);
+            body.appendChild(cmdEl);
+        }
+        if (data.output) {
+            var outEl = document.createElement('div');
+            outEl.className = 'tool-detail-output';
+            outEl.textContent = data.output;
+            body.appendChild(outEl);
+        }
+        if (data.exitCode !== undefined) {
+            var exitEl = document.createElement('div');
+            exitEl.className = 'tool-detail-exit';
+            exitEl.textContent = 'exit code: ' + data.exitCode;
+            body.appendChild(exitEl);
+        }
+    } else if (tool === 'edit' && data.diff) {
+        var diffEl = document.createElement('div');
+        diffEl.innerHTML = renderDiff(data.diff);
+        body.appendChild(diffEl);
+    } else if (data.output) {
+        var genericEl = document.createElement('div');
+        genericEl.className = 'tool-detail-output';
+        genericEl.textContent = data.output;
+        body.appendChild(genericEl);
+    }
+
+    card.appendChild(body);
+
+    // 点击展开/折叠
+    header.addEventListener('click', function () {
+        card.classList.toggle('open');
+    });
+
+    return card;
+}
+
+function handleToolDetail(data) {
+    var resp = ensureResponse();
+    removeLoadingIndicator(resp);
+
+    var card = buildToolDetailCard(data);
+    if (!card) return;
+
+    // 插入到 toolBar 之后、textEl 之前
+    if (resp.toolBar && resp.toolBar.parentNode === resp.container) {
+        var nextSibling = resp.toolBar.nextSibling;
+        while (nextSibling && nextSibling !== resp.textEl) {
+            nextSibling = nextSibling.nextSibling;
+        }
+        resp.container.insertBefore(card, nextSibling || null);
+    } else {
+        resp.container.appendChild(card);
+    }
+
+    scrollToBottom();
+}
+
+function renderDiff(diffText) {
+    var lines = diffText.split('\n');
+    var html = '';
+    for (var i = 0; i < lines.length; i++) {
+        var line = lines[i];
+        var cls = 'diff-line ';
+        if (line.startsWith('@@')) {
+            cls += 'diff-line-header';
+        } else if (line.startsWith('+')) {
+            cls += 'diff-line-added';
+        } else if (line.startsWith('-')) {
+            cls += 'diff-line-removed';
+        } else {
+            cls += 'diff-line-context';
+        }
+        html += '<div class="' + cls + '">' + escapeHtml(line) + '</div>';
+    }
+    return html;
 }
 
 // ── Question 处理 ─────────────────────────────────
@@ -787,7 +931,7 @@ function renderSkillList() {
             var card = document.createElement('div');
             card.className = 'skill-card' + (s.id === activeSkillId ? ' active' : '');
             card.innerHTML =
-                '<div class="card-name">' + escapeHtml(s.name) + '</div>' +
+                '<div class="card-name">' + escapeHtml(s.description || s.name) + '</div>' +
                 '<div class="card-meta">' +
                     '<span class="card-status-badge ' + s.status + '">' + statusLabel(s.status) + '</span>' +
                     '<span class="card-msg-count">' + s.message_count + ' 条对话</span>' +
@@ -809,7 +953,7 @@ function selectSkill(skillId) {
     document.getElementById('emptyState').style.display = 'none';
     document.getElementById('chatArea').style.display = 'flex';
 
-    document.getElementById('skillName').textContent = skill.name;
+    document.getElementById('skillName').textContent = skill.description || skill.name;
 
     var statusEl = document.getElementById('skillStatus');
     statusEl.textContent = statusLabel(skill.status);
@@ -827,7 +971,7 @@ function selectSkill(skillId) {
             if (msgs[i].role === 'user') {
                 appendUserMessage(msgs[i].content);
             } else {
-                appendAssistantHistory(msgs[i].content, msgs[i].thinking || '');
+                appendAssistantHistory(msgs[i].content, msgs[i].thinking || '', msgs[i].tool_details || []);
             }
         }
         scrollToBottom();
@@ -844,7 +988,7 @@ function appendUserMessage(content) {
     return el;
 }
 
-function appendAssistantHistory(content, thinking) {
+function appendAssistantHistory(content, thinking, toolDetails) {
     var messagesEl = document.getElementById('messages');
     var container = document.createElement('div');
     container.className = 'ai-response complete';
@@ -870,6 +1014,16 @@ function appendAssistantHistory(content, thinking) {
                 '<div class="thinking-body"></div>';
             block.querySelector('.thinking-body').textContent = roundText;
             container.appendChild(block);
+        }
+    }
+
+    // 渲染工具详情（从历史恢复）
+    if (toolDetails && toolDetails.length > 0) {
+        for (var ti = 0; ti < toolDetails.length; ti++) {
+            var fakeData = toolDetails[ti];
+            // 直接调用 handleToolDetail 的逻辑，但需要临时设置 currentResponse
+            var detailCard = buildToolDetailCard(fakeData);
+            if (detailCard) container.appendChild(detailCard);
         }
     }
 
