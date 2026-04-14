@@ -28,6 +28,42 @@ if FRONTEND_DIR.exists():
     api.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
 
+# ── Stream Context（后台流式 + 重连恢复）────────────────────
+
+class StreamContext:
+    """跟踪正在进行的流式生成，支持 WS 断开后继续运行。"""
+    def __init__(self):
+        self.queue: asyncio.Queue[dict | None] = asyncio.Queue()
+        self.task: asyncio.Task | None = None
+        self.done: bool = False
+        self.server = None  # ServerInstance reference
+
+_stream_contexts: dict[str, StreamContext] = {}
+
+
+async def _run_stream(skill_id: str, user_message: str, ctx: StreamContext):
+    """后台任务：运行 chat_stream 并将 chunks 写入队列。WS 断开不中断。"""
+    try:
+        async for chunk in skill_manager.chat_stream(skill_id, user_message):
+            await ctx.queue.put(chunk)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.error("Stream worker error: %s", e, exc_info=True)
+        await ctx.queue.put({"type": "error", "content": f"Stream error: {e}"})
+    finally:
+        ctx.done = True
+        await ctx.queue.put(None)  # sentinel
+        # 释放 OpenCode 服务
+        if ctx.server:
+            await server_pool.release(ctx.server.port)
+        # 清理 context
+        if skill_id in _stream_contexts and _stream_contexts[skill_id] is ctx:
+            del _stream_contexts[skill_id]
+        async with _auto_send_lock:
+            _auto_sending.discard(skill_id)
+
+
 # Fix 7: 优雅关闭钩子
 @api.on_event("shutdown")
 async def shutdown():
@@ -114,15 +150,15 @@ async def delete_skill(skill_id: str):
     return {"deleted": True}
 
 
-# ─── WebSocket Chat — 按需启停 OpenCode ─────────────────────
+# ─── WebSocket Chat — 按需启停 OpenCode，支持断线恢复 ──────
 
 @api.websocket("/ws/chat/{skill_id}")
 async def ws_chat(websocket: WebSocket, skill_id: str):
     """
     WebSocket 聊天端点：
     - 连接时启动 OpenCode（cwd = skill workspace）
-    - 断开时释放 OpenCode（空闲 5 分钟后自动关闭）
-    - 流式转发 OpenCode 响应
+    - 断开时保留流式任务继续运行（内容增量持久化到磁盘）
+    - 重连时恢复已生成的内容并继续接收新内容
     - 支持 question 工具的双向交互
     """
     await websocket.accept()
@@ -140,27 +176,105 @@ async def ws_chat(websocket: WebSocket, skill_id: str):
         await websocket.close()
         return
 
-    # ── 启动 OpenCode ──
-    # 只有需要 auto-send 时才显示启动状态
-    auto_send_task = None
+    # ── 检查是否有进行中的流（断线恢复） ──
+    existing_ctx = _stream_contexts.get(skill_id)
+    if existing_ctx and not existing_ctx.done:
+        print(f"[WS] Resuming stream for skill_id={skill_id}", flush=True)
+        # 发送当前已累积的内容
+        streaming_msg = skill_manager.get_streaming_message(skill_id)
+        if streaming_msg:
+            await _safe_send(websocket, {
+                "type": "stream_resume",
+                "content": streaming_msg.content,
+                "thinking": streaming_msg.thinking,
+                "tool_details": streaming_msg.tool_details,
+            })
+
+        # 排空旧 chunks（内容已通过 stream_resume 发送）
+        # 同时检测 done 事件（流可能在断线期间已完成）
+        stream_done = False
+        while not existing_ctx.queue.empty():
+            try:
+                old_chunk = existing_ctx.queue.get_nowait()
+                if old_chunk is not None and old_chunk.get("type") == "done":
+                    stream_done = True
+            except asyncio.QueueEmpty:
+                break
+
+        # 如果流已完成（排空时找到 done 或 worker 已标记完成）
+        if stream_done or existing_ctx.done:
+            await _safe_send(websocket, {"type": "done", "content": "", "skill_id": skill_id})
+            return
+
+        # 继续转发新 chunks（带超时保护 + 同时监听 WS 消息处理 question_reply）
+        async def _forward_chunks():
+            """从队列读取 chunks 并转发到 WS。"""
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(existing_ctx.queue.get(), timeout=60.0)
+                except asyncio.TimeoutError:
+                    print(f"[WS] Resume timeout (60s no data), finalizing: skill_id={skill_id}", flush=True)
+                    if skill_manager.is_streaming(skill_id):
+                        skill.status = SkillStatus.ACTIVE
+                        skill_manager._save_skill(skill)
+                        skill_manager._streaming.pop(skill_id, None)
+                    await _safe_send(websocket, {"type": "done", "content": "", "skill_id": skill_id})
+                    await asyncio.sleep(0.3)
+                    return "timeout"
+                if chunk is None:
+                    return "done"
+                if chunk.get("type") == "question":
+                    await _handle_question(websocket, skill_id, chunk)
+                else:
+                    await _safe_send(websocket, chunk)
+            return "done"
+
+        async def _receive_ws_messages():
+            """监听 WS 消息，处理 question_reply。"""
+            while True:
+                try:
+                    data = await websocket.receive_json()
+                except Exception:
+                    return
+                if data.get("type") == "question_reply":
+                    request_id = data.get("request_id", "")
+                    answers = data.get("answers", [])
+                    if request_id:
+                        print(f"[WS] Resume question reply: request_id={request_id}", flush=True)
+                        await skill_manager.reply_question(skill_id, request_id, answers)
+
+        try:
+            forward_task = asyncio.create_task(_forward_chunks())
+            receive_task = asyncio.create_task(_receive_ws_messages())
+            done, pending = await asyncio.wait(
+                [forward_task, receive_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+            for t in done:
+                pass  # result already handled
+        except WebSocketDisconnect:
+            print(f"[WS] Disconnected during resume: skill_id={skill_id}", flush=True)
+        return
+
+    # ── 正常连接 ──
     need_auto_send = False
     async with _auto_send_lock:
         user_msgs = [m for m in skill.messages if m.role == MessageRole.USER]
         has_assistant = any(m.role == MessageRole.ASSISTANT for m in skill.messages)
-        # 仅首次创建、仅1条用户消息、无助手回复、且未触发过auto-send时才自动发送
         if (skill_id not in _auto_sending
                 and not skill.auto_sent
                 and len(user_msgs) == 1
                 and not has_assistant):
             need_auto_send = True
             skill.auto_sent = True
-            skill_manager._save_skill(skill)  # 立即持久化，防止重启后丢失
+            skill_manager._save_skill(skill)
             _auto_sending.add(skill_id)
 
     if need_auto_send:
         await _safe_send(websocket, {"type": "status", "content": "正在启动 AI 助手..."})
 
-    # Fix 5: try/finally 从 start 之后立即开始，防止 slot 泄漏
     server = await server_pool.start(skill_id, workspace)
     if not server:
         await _safe_send(websocket, {"type": "error", "content": "AI 助手启动失败，可能并发数已满（最多3个）"})
@@ -176,26 +290,31 @@ async def ws_chat(websocket: WebSocket, skill_id: str):
             await websocket.send_json({"type": "status", "content": "AI 助手已就绪，正在分析需求..."})
             print(f"[WS] Auto-sending initial message: {initial_msg[:50]}...", flush=True)
 
-            async def _auto_send():
-                try:
-                    async for chunk in skill_manager.chat_stream(skill_id, initial_msg):
-                        if chunk.get("type") == "question":
-                            await _handle_question(websocket, skill_id, chunk)
-                        else:
-                            await _safe_send(websocket, chunk)
-                except Exception as e:
-                    print(f"[WS] Auto-send error: {e}", flush=True)
-                    await _safe_send(websocket, {"type": "error", "content": f"自动发送失败: {e}"})
-                finally:
-                    async with _auto_send_lock:
-                        _auto_sending.discard(skill_id)
-                    print(f"[WS] Auto-send finished for {skill_id}", flush=True)
+            # 创建 StreamContext，后台 worker 运行流式生成
+            ctx = StreamContext()
+            ctx.server = server
+            _stream_contexts[skill_id] = ctx
+            ctx.task = asyncio.create_task(_run_stream(skill_id, initial_msg, ctx))
 
-            auto_send_task = asyncio.create_task(_auto_send())
+            # 从队列转发 chunks 到 WS
+            try:
+                while True:
+                    chunk = await ctx.queue.get()
+                    if chunk is None:
+                        break
+                    if chunk.get("type") == "question":
+                        await _handle_question(websocket, skill_id, chunk)
+                    else:
+                        await _safe_send(websocket, chunk)
+            except WebSocketDisconnect:
+                # WS 断开但 worker 继续运行，内容持久化到磁盘
+                print(f"[WS] Disconnected, stream worker continues: skill_id={skill_id}", flush=True)
+            return
+
         elif has_assistant or skill_id in _auto_sending:
             print(f"[WS] Skill already has response or being processed, skipping auto-send", flush=True)
 
-        # ── 消息循环 ──
+        # ── 消息循环（手动发送） ──
         while True:
             data = await websocket.receive_json()
 
@@ -215,12 +334,13 @@ async def ws_chat(websocket: WebSocket, skill_id: str):
                 await _safe_send(websocket, {"type": "error", "content": "消息不能为空"})
                 continue
 
-            # 如果 auto_send 还在运行，先取消它
-            if auto_send_task and not auto_send_task.done():
-                print(f"[WS] Cancelling auto_send for {skill_id}, user sent new message", flush=True)
-                auto_send_task.cancel()
+            # 检查是否有正在进行的流式任务
+            existing_ctx = _stream_contexts.get(skill_id)
+            if existing_ctx and not existing_ctx.done:
+                print(f"[WS] Cancelling existing stream for {skill_id}", flush=True)
+                existing_ctx.task.cancel()
                 try:
-                    await auto_send_task
+                    await existing_ctx.task
                 except asyncio.CancelledError:
                     pass
                 await _safe_send(websocket, {"type": "done", "content": "", "skill_id": skill_id})
@@ -228,24 +348,38 @@ async def ws_chat(websocket: WebSocket, skill_id: str):
             # UI: 发送生成状态
             await websocket.send_json({"type": "status", "content": "正在生成..."})
 
-            # 流式转发 OpenCode 响应
-            async for chunk in skill_manager.chat_stream(skill_id, user_message):
-                if chunk.get("type") == "question":
-                    await _handle_question(websocket, skill_id, chunk)
-                else:
-                    await _safe_send(websocket, chunk)
+            # 创建 StreamContext，后台 worker 运行流式生成
+            ctx = StreamContext()
+            ctx.server = server
+            _stream_contexts[skill_id] = ctx
+            ctx.task = asyncio.create_task(_run_stream(skill_id, user_message, ctx))
+
+            # 从队列转发 chunks 到 WS
+            try:
+                while True:
+                    chunk = await ctx.queue.get()
+                    if chunk is None:
+                        break
+                    if chunk.get("type") == "question":
+                        await _handle_question(websocket, skill_id, chunk)
+                    else:
+                        await _safe_send(websocket, chunk)
+            except WebSocketDisconnect:
+                print(f"[WS] Disconnected during manual send, stream continues: skill_id={skill_id}", flush=True)
+            return  # 退出消息循环
 
     except WebSocketDisconnect:
         print(f"[WS] Disconnected: skill_id={skill_id}", flush=True)
     except Exception as e:
         print(f"[WS] Error: {e}", flush=True)
     finally:
-        if auto_send_task and not auto_send_task.done():
-            auto_send_task.cancel()
+        # 只有没有活跃流式任务时才释放 OpenCode
+        ctx = _stream_contexts.get(skill_id)
+        if not ctx or ctx.done:
+            print(f"[WS] Releasing OpenCode for skill_id={skill_id}", flush=True)
+            await server_pool.release(server.port)
         async with _auto_send_lock:
             _auto_sending.discard(skill_id)
-        print(f"[WS] Releasing OpenCode for skill_id={skill_id}", flush=True)
-        await server_pool.release(server.port)
 
 
 async def _safe_send(websocket: WebSocket, data: dict) -> None:

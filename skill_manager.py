@@ -42,6 +42,7 @@ class SkillManager:
 
     def __init__(self) -> None:
         self._skills: dict[str, Skill] = {}
+        self._streaming: dict[str, dict] = {}  # skill_id → {msg_idx}
         _ensure_skills_dir()
         self._load_all_skills()
         self._system_prompt = self._load_system_prompt()
@@ -74,12 +75,20 @@ class SkillManager:
         (ws / META_FILE).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
         # 保存消息
+        self._save_messages_only(skill)
+
+    def _save_messages_only(self, skill: Skill) -> None:
+        """只保存消息到磁盘（流式增量保存用）。"""
+        if not skill.workspace:
+            return
+        ws = Path(skill.workspace)
         msgs = [
             {
                 "id": m.id,
                 "role": m.role.value,
                 "content": m.content,
                 "thinking": m.thinking,
+                "tool_details": m.tool_details,
                 "timestamp": _dt_to_str(m.timestamp),
             }
             for m in skill.messages
@@ -121,6 +130,7 @@ class SkillManager:
                         role=MessageRole(m["role"]),
                         content=m["content"],
                         thinking=m.get("thinking", ""),
+                        tool_details=m.get("tool_details", []),
                         timestamp=_str_to_dt(m["timestamp"]),
                     ))
 
@@ -179,6 +189,22 @@ class SkillManager:
 
     # ── 对话 ──────────────────────────────────────────
 
+    def is_streaming(self, skill_id: str) -> bool:
+        """检查指定 skill 是否正在流式生成中。"""
+        return skill_id in self._streaming
+
+    def get_streaming_message(self, skill_id: str) -> Message | None:
+        """获取正在流式生成的助手消息。"""
+        if skill_id not in self._streaming:
+            return None
+        skill = self._skills.get(skill_id)
+        if not skill:
+            return None
+        msg_idx = self._streaming[skill_id]["msg_idx"]
+        if msg_idx < len(skill.messages):
+            return skill.messages[msg_idx]
+        return None
+
     async def chat_stream(self, skill_id: str, user_message: str):
         skill = self._skills.get(skill_id)
         if not skill:
@@ -197,49 +223,103 @@ class SkillManager:
             )
         skill.status = SkillStatus.ITERATING
 
+        # 创建流式助手消息（空内容），后续增量更新并持久化
+        streaming_msg = Message(
+            role=MessageRole.ASSISTANT,
+            content="",
+            thinking="",
+            tool_details=[],
+        )
+        skill.messages.append(streaming_msg)
+        msg_idx = len(skill.messages) - 1
+
+        # 跟踪流式状态
+        self._streaming[skill_id] = {"msg_idx": msg_idx}
+
         full_response = ""
         full_thinking = ""
-        full_tool_details: list[dict] = []  # 收集工具详情
-        thinking_has_content = False  # 追踪当前思考轮次是否已有内容
+        full_tool_details: list[dict] = []
+        thinking_has_content = False
+        last_save_time = time.monotonic()
+        SAVE_INTERVAL = 1.0  # 每 1 秒增量保存
+
         try:
             async for chunk in self._stream_from_opencode(skill, user_message):
+                now = time.monotonic()
+
                 if chunk.get("type") == "text":
                     full_response += chunk.get("content", "")
+                    streaming_msg.content = full_response
                     yield chunk
                 elif chunk.get("type") == "thinking_round_start":
-                    # 新一轮思考开始，在已有内容时插入分隔符
                     if full_thinking and thinking_has_content:
                         full_thinking += THINKING_ROUND_SEP
                     thinking_has_content = False
                 elif chunk.get("type") == "thinking":
                     full_thinking += chunk.get("content", "")
                     thinking_has_content = True
+                    streaming_msg.thinking = full_thinking
                     yield chunk
                 elif chunk.get("type") == "question":
-                    # AI 提问，直接透传给前端（ws_chat 负责处理交互）
+                    # 保存 question 数据到 tool_details，以便刷新后恢复
+                    full_tool_details.append({
+                        "type": "question",
+                        "request_id": chunk.get("request_id", ""),
+                        "questions": chunk.get("questions", []),
+                    })
+                    streaming_msg.tool_details = list(full_tool_details)
                     yield chunk
                 elif chunk.get("type") == "tool_status":
                     yield chunk
                 elif chunk.get("type") == "tool_detail":
                     full_tool_details.append(chunk)
+                    streaming_msg.tool_details = list(full_tool_details)
                     yield chunk
                 elif chunk.get("type") == "status":
                     yield chunk
                 elif chunk.get("type") == "error":
+                    streaming_msg.content = full_response
+                    streaming_msg.thinking = full_thinking
+                    streaming_msg.tool_details = list(full_tool_details)
+                    self._save_messages_only(skill)
+                    self._streaming.pop(skill_id, None)
                     yield chunk
                     return
+
+                # 增量保存（节流）
+                if now - last_save_time >= SAVE_INTERVAL:
+                    streaming_msg.content = full_response
+                    streaming_msg.thinking = full_thinking
+                    streaming_msg.tool_details = list(full_tool_details)
+                    self._save_messages_only(skill)
+                    last_save_time = now
+
+        except asyncio.CancelledError:
+            # 流被取消，保存已生成的内容
+            streaming_msg.content = full_response
+            streaming_msg.thinking = full_thinking
+            streaming_msg.tool_details = list(full_tool_details)
+            self._save_messages_only(skill)
+            self._streaming.pop(skill_id, None)
+            return
+
         except Exception as e:
             logger.error("Stream error: %s", e, exc_info=True)
+            streaming_msg.content = full_response
+            streaming_msg.thinking = full_thinking
+            streaming_msg.tool_details = list(full_tool_details)
+            self._save_messages_only(skill)
+            self._streaming.pop(skill_id, None)
             yield {"type": "error", "content": f"流式读取错误: {e}"}
             return
 
-        if full_response:
-            skill.messages.append(
-                Message(role=MessageRole.ASSISTANT, content=full_response, thinking=full_thinking, tool_details=full_tool_details)
-            )
-
+        # 流式完成，最终保存
+        streaming_msg.content = full_response
+        streaming_msg.thinking = full_thinking
+        streaming_msg.tool_details = list(full_tool_details)
         skill.status = SkillStatus.ACTIVE
         self._save_skill(skill)
+        self._streaming.pop(skill_id, None)
         yield {"type": "done", "content": "", "skill_id": skill.id}
 
     # ── 回答 OpenCode question ────────────────────────

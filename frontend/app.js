@@ -213,8 +213,41 @@ function connectWS(skillId) {
 
 // ── 消息渲染状态 ──
 var currentResponse = null;
+var _streamingTimeout = null;
+var STREAMING_IDLE_TIMEOUT = 90000;  // 90 秒无数据自动结束流式
+
+function _hasPendingQuestion() {
+    return !!document.querySelector('.question-card:not(.question-answered)');
+}
+
+function _resetStreamingTimeout() {
+    if (_streamingTimeout) clearTimeout(_streamingTimeout);
+    if (currentResponse) {
+        _streamingTimeout = setTimeout(function() {
+            // 有未回答的问题时不结束，继续等待
+            if (_hasPendingQuestion()) {
+                _resetStreamingTimeout();
+                return;
+            }
+            if (currentResponse) {
+                console.log('Streaming timeout, auto-finalizing');
+                handleDone({content: '', skill_id: activeSkillId || ''});
+            }
+        }, STREAMING_IDLE_TIMEOUT);
+    }
+}
+
+function _clearStreamingTimeout() {
+    if (_streamingTimeout) { clearTimeout(_streamingTimeout); _streamingTimeout = null; }
+}
 
 function handleWSMessage(data) {
+    // 收到任何流式数据时重置超时
+    if (data.type === 'status' || data.type === 'text' || data.type === 'thinking' ||
+        data.type === 'tool_status' || data.type === 'tool_detail' || data.type === 'stream_resume') {
+        _resetStreamingTimeout();
+    }
+
     if (data.type === 'status') {
         handleStatus(data);
     }
@@ -238,6 +271,9 @@ function handleWSMessage(data) {
     }
     else if (data.type === 'error') {
         handleError(data);
+    }
+    else if (data.type === 'stream_resume') {
+        handleStreamResume(data);
     }
 }
 
@@ -746,6 +782,7 @@ function handleText(data) {
 }
 
 function handleDone(data) {
+    _clearStreamingTimeout();  // 清除流式超时
     var resp = currentResponse;
     if (!resp) return;
 
@@ -812,6 +849,57 @@ function handleError(data) {
 
     currentResponse = null;
     document.getElementById('sendBtn').disabled = false;
+    scrollToBottom();
+}
+
+function handleStreamResume(data) {
+    var messagesEl = document.getElementById('messages');
+
+    // 查找最后一个助手消息元素
+    var lastAssistant = null;
+    var children = messagesEl.children;
+    for (var i = children.length - 1; i >= 0; i--) {
+        if (children[i].classList.contains('ai-response')) {
+            lastAssistant = children[i];
+            break;
+        }
+    }
+
+    if (lastAssistant) {
+        // 将已有消息转为流式状态
+        lastAssistant.classList.remove('complete');
+        lastAssistant.classList.add('streaming');
+
+        // 移除"回复完成"分隔线
+        var divider = lastAssistant.querySelector('.response-divider');
+        if (divider) divider.remove();
+
+        // 移除所有思考块的 spinner（如果有）
+        var spinners = lastAssistant.querySelectorAll('.thinking-spinner');
+        for (var si = 0; si < spinners.length; si++) { spinners[si].remove(); }
+
+        // 设置 currentResponse 指向此元素
+        var textEl = lastAssistant.querySelector('.response-text');
+        currentResponse = {
+            container: lastAssistant,
+            indicator: null,
+            thinkingText: data.thinking || '',
+            textEl: textEl,
+            textContent: data.content || '',
+            toolBar: lastAssistant.querySelector('.tool-status-bar')
+        };
+    } else {
+        // 没有已有消息，创建新的流式元素
+        currentResponse = null;
+        ensureResponse();
+    }
+
+    // 添加加载指示器
+    if (currentResponse) {
+        updateLoadingIndicator(currentResponse, '继续生成中...');
+    }
+    document.getElementById('sendBtn').disabled = true;
+    _resetStreamingTimeout();  // 启动流式超时保护
     scrollToBottom();
 }
 
@@ -960,11 +1048,11 @@ function selectSkill(skillId) {
     statusEl.className = 'chat-skill-status card-status-badge ' + skill.status;
 
     renderSkillList();
-    connectWS(skillId);
 
+    // 先加载历史消息到 DOM，再连接 WS
+    // 这样 stream_resume 到达时 DOM 已准备好，避免竞态
     loadMessages(skillId).then(function(msgs) {
         var messagesEl = document.getElementById('messages');
-        // 清空前重置状态，防止 WebSocket 写入已删除的 DOM
         currentResponse = null;
         messagesEl.innerHTML = '';
         for (var i = 0; i < msgs.length; i++) {
@@ -975,6 +1063,8 @@ function selectSkill(skillId) {
             }
         }
         scrollToBottom();
+        // 消息渲染完成后才连接 WS（stream_resume 需要找到已渲染的 DOM）
+        connectWS(skillId);
     });
 }
 
@@ -986,6 +1076,119 @@ function appendUserMessage(content) {
     messagesEl.appendChild(el);
     scrollToBottom();
     return el;
+}
+
+// 从历史数据恢复 question 卡片，检测是否已回答
+function _buildHistoryQuestionCard(data, allToolDetails) {
+    var requestId = data.request_id || '';
+    var questions = data.questions || [];
+    if (!questions.length) return null;
+
+    // 在 tool_details 中查找是否已回答（type=question 且 output 包含答案信息）
+    var isAnswered = false;
+    var answerText = '';
+    for (var di = 0; di < allToolDetails.length; di++) {
+        var td = allToolDetails[di];
+        // 检测 type 或 tool 字段为 question，且 output 包含 answered 关键字
+        if ((td.type === 'question' || td.tool === 'question') && td.output && td.output.indexOf('answered') >= 0) {
+            isAnswered = true;
+            answerText = td.output;
+            break;
+        }
+    }
+
+    var card = document.createElement('div');
+    card.className = 'question-card' + (isAnswered ? ' question-answered' : '');
+    card.setAttribute('data-request-id', requestId);
+
+    var header = document.createElement('div');
+    header.className = 'question-header';
+    header.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>' +
+        '<span class="question-title">AI 有问题想问你</span>';
+    card.appendChild(header);
+
+    for (var qi = 0; qi < questions.length; qi++) {
+        var q = questions[qi];
+        var block = document.createElement('div');
+        block.className = 'question-block' + (isAnswered ? ' answered' : '');
+        block.setAttribute('data-q-index', qi);
+
+        var label = document.createElement('div');
+        label.className = 'question-label';
+        label.textContent = q.header ? q.header + '：' + q.question : q.question;
+        block.appendChild(label);
+
+        var opts = q.options || [];
+        if (opts.length > 0) {
+            var optList = document.createElement('div');
+            optList.className = 'question-options';
+            for (var oi = 0; oi < opts.length; oi++) {
+                (function(opt, qIdx) {
+                    var btn = document.createElement('button');
+                    btn.className = 'question-option-btn';
+                    // 如果已回答，从 output 中提取答案并标记选中状态
+                    if (isAnswered && answerText.indexOf('="' + opt.label + '"') >= 0) {
+                        btn.classList.add('selected');
+                    }
+                    btn.innerHTML = '<span class="option-label">' + escapeHtml(opt.label) + '</span>' +
+                        (opt.description ? '<span class="option-desc">' + escapeHtml(opt.description) + '</span>' : '');
+                    if (isAnswered) {
+                        btn.disabled = true;
+                        if (!btn.classList.contains('selected')) btn.disabled = true;
+                    } else {
+                        btn.addEventListener('click', function() {
+                            _submitQuestionAnswer(requestId, qIdx, opt.label, card);
+                        });
+                    }
+                    optList.appendChild(btn);
+                })(opts[oi], qi);
+            }
+            block.appendChild(optList);
+        } else {
+            // 自由文本输入（已回答时显示答案，未回答时显示输入框）
+            if (isAnswered && answerText) {
+                var ansEl = document.createElement('div');
+                ansEl.className = 'question-answer-status';
+                ansEl.textContent = answerText;
+                block.appendChild(ansEl);
+            } else {
+                var input = document.createElement('div');
+                input.className = 'question-input-wrapper';
+                var textInput = document.createElement('input');
+                textInput.type = 'text';
+                textInput.className = 'question-text-input';
+                textInput.placeholder = '输入你的回答...';
+                textInput.setAttribute('data-q-index', qi);
+                var submitBtn = document.createElement('button');
+                submitBtn.className = 'question-submit-btn';
+                submitBtn.textContent = '回答';
+                submitBtn.addEventListener('click', function() {
+                    var val = textInput.value.trim();
+                    if (val) _submitQuestionAnswer(requestId, qi, val, card);
+                });
+                textInput.addEventListener('keydown', function(e) {
+                    if (e.key === 'Enter') {
+                        var val = textInput.value.trim();
+                        if (val) _submitQuestionAnswer(requestId, qi, val, card);
+                    }
+                });
+                input.appendChild(textInput);
+                input.appendChild(submitBtn);
+                block.appendChild(input);
+            }
+        }
+        card.appendChild(block);
+    }
+
+    // 已回答时显示答案摘要
+    if (isAnswered && answerText) {
+        var statusEl = document.createElement('div');
+        statusEl.className = 'question-answer-status';
+        statusEl.textContent = answerText;
+        card.appendChild(statusEl);
+    }
+
+    return card;
 }
 
 function appendAssistantHistory(content, thinking, toolDetails) {
@@ -1017,13 +1220,19 @@ function appendAssistantHistory(content, thinking, toolDetails) {
         }
     }
 
-    // 渲染工具详情（从历史恢复）
+    // 渲染工具详情和 question（从历史恢复）
     if (toolDetails && toolDetails.length > 0) {
         for (var ti = 0; ti < toolDetails.length; ti++) {
             var fakeData = toolDetails[ti];
-            // 直接调用 handleToolDetail 的逻辑，但需要临时设置 currentResponse
-            var detailCard = buildToolDetailCard(fakeData);
-            if (detailCard) container.appendChild(detailCard);
+            if (fakeData.type === 'question') {
+                // 渲染 question 卡片，传入完整 toolDetails 以检测是否已回答
+                var qCard = _buildHistoryQuestionCard(fakeData, toolDetails);
+                if (qCard) container.appendChild(qCard);
+            } else {
+                // 渲染普通工具详情
+                var detailCard = buildToolDetailCard(fakeData);
+                if (detailCard) container.appendChild(detailCard);
+            }
         }
     }
 
@@ -1033,13 +1242,29 @@ function appendAssistantHistory(content, thinking, toolDetails) {
     textBlock.innerHTML = renderMarkdown(content);
     container.appendChild(textBlock);
 
-    // 分隔线
-    var divider = document.createElement('div');
-    divider.className = 'response-divider';
-    divider.innerHTML = '<div class="divider-line"></div>' +
-        '<span class="divider-label">回复完成</span>' +
-        '<div class="divider-line"></div>';
-    container.appendChild(divider);
+    // 判断是否为进行中的对话（creating/iterating 状态不显示"回复完成"）
+    var isActive = true;
+    for (var si = 0; si < skills.length; si++) {
+        if (skills[si].id === activeSkillId) {
+            if (skills[si].status === 'creating' || skills[si].status === 'iterating') {
+                isActive = false;
+            }
+            break;
+        }
+    }
+
+    if (isActive) {
+        // 已完成：显示分隔线
+        container.classList.add('complete');
+        var divider = document.createElement('div');
+        divider.className = 'response-divider';
+        divider.innerHTML = '<div class="divider-line"></div>' +
+            '<span class="divider-label">回复完成</span>' +
+            '<div class="divider-line"></div>';
+        container.appendChild(divider);
+    }
+    // 进行中的对话：不加分隔线，不加 complete 类
+    // stream_resume 或 WS chunks 会处理后续状态
 
     messagesEl.appendChild(container);
     scrollToBottom();
