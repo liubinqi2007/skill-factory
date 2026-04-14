@@ -909,24 +909,64 @@ function removeCursor() {
 }
 
 // ── Markdown 渲染 ─────────────────────────────────
-function renderMarkdown(text) {
-    var html = escapeHtml(text);
-
-    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, function(m, lang, code) {
-        return '<div class="code-block"><div class="code-lang">' + (lang || 'code') + '</div><pre>' + code + '</pre></div>';
+// 配置 marked.js
+if (typeof marked !== 'undefined') {
+    marked.setOptions({
+        highlight: function(code, lang) {
+            if (lang && hljs.getLanguage(lang)) {
+                try {
+                    return hljs.highlight(code, { language: lang }).value;
+                } catch (e) {}
+            }
+            return hljs.highlightAuto(code).value;
+        },
+        langPrefix: 'hljs language-',
+        breaks: true,
+        gfm: true
     });
+}
 
-    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-    html = html.replace(/^### (.+)$/gm, '<h4>$1</h4>');
-    html = html.replace(/^## (.+)$/gm, '<h3>$1</h3>');
-    html = html.replace(/^# (.+)$/gm, '<h2>$1</h2>');
-    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
-    html = html.replace(/^(\d+)\. (.+)$/gm, '<li>$2</li>');
-    html = html.replace(/\n/g, '<br>');
+function renderMarkdown(text) {
+    // 使用 marked.js 渲染 Markdown
+    var html = typeof marked !== 'undefined' ? marked.parse(text) : escapeHtml(text);
+
+    // 处理代码块，添加语言标签和复制按钮
+    html = html.replace(/<pre><code class="hljs language-(\w*)">([\s\S]*?)<\/code><\/pre>/g, function(m, lang, code) {
+        var langLabel = lang ? lang.toUpperCase() : 'CODE';
+        return '<div class="code-block">' +
+                    '<div class="code-header">' +
+                        '<span class="code-lang">' + langLabel + '</span>' +
+                        '<button class="code-copy-btn" onclick="copyCodeBlock(this)" title="复制代码">' +
+                            '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>' +
+                            '<span class="copy-text">复制</span>' +
+                        '</button>' +
+                    '</div>' +
+                    '<pre><code class="hljs language-' + lang + '">' + code + '</code></pre>' +
+               '</div>';
+    });
 
     return html;
 }
+
+// 复制代码块功能
+window.copyCodeBlock = function(button) {
+    var codeBlock = button.closest('.code-block');
+    var code = codeBlock.querySelector('code').textContent;
+
+    navigator.clipboard.writeText(code).then(function() {
+        var copyText = button.querySelector('.copy-text');
+        var originalText = copyText.textContent;
+        copyText.textContent = '已复制!';
+        button.classList.add('copied');
+
+        setTimeout(function() {
+            copyText.textContent = originalText;
+            button.classList.remove('copied');
+        }, 2000);
+    }).catch(function(err) {
+        console.error('复制失败:', err);
+    });
+};
 
 // ── API ────────────────────────────────────────────
 function loadSkills() {

@@ -54,9 +54,7 @@ async def _run_stream(skill_id: str, user_message: str, ctx: StreamContext):
     finally:
         ctx.done = True
         await ctx.queue.put(None)  # sentinel
-        # 释放 OpenCode 服务
-        if ctx.server:
-            await server_pool.release(ctx.server.port)
+        # 注意：不在这里释放 OpenCode，由 ws_chat 的 finally 统一管理
         # 清理 context
         if skill_id in _stream_contexts and _stream_contexts[skill_id] is ctx:
             del _stream_contexts[skill_id]
@@ -309,7 +307,7 @@ async def ws_chat(websocket: WebSocket, skill_id: str):
             except WebSocketDisconnect:
                 # WS 断开但 worker 继续运行，内容持久化到磁盘
                 print(f"[WS] Disconnected, stream worker continues: skill_id={skill_id}", flush=True)
-            return
+                return  # WS断开才退出
 
         elif has_assistant or skill_id in _auto_sending:
             print(f"[WS] Skill already has response or being processed, skipping auto-send", flush=True)
@@ -366,7 +364,8 @@ async def ws_chat(websocket: WebSocket, skill_id: str):
                         await _safe_send(websocket, chunk)
             except WebSocketDisconnect:
                 print(f"[WS] Disconnected during manual send, stream continues: skill_id={skill_id}", flush=True)
-            return  # 退出消息循环
+                return  # 只有WS断开才退出
+            # 流式完成后不退出，继续等待下一条消息
 
     except WebSocketDisconnect:
         print(f"[WS] Disconnected: skill_id={skill_id}", flush=True)
