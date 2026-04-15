@@ -386,12 +386,34 @@ html, body {
     animation: msg-in 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+/* ── Round Container（轮次容器） ── */
+.round-container {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 4px;
+}
+
+/* 多轮对话时，增加轮次之间的间距 */
+.ai-response .round-container:not(:last-child) {
+    margin-bottom: 8px;
+    padding-bottom: 8px;
+    border-bottom: 1px dashed var(--border-subtle);
+}
+
+/* 最后一个轮次不需要底部间距和边框 */
+.ai-response .round-container:last-child {
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom: none;
+}
+
 /* ── Thinking Block (可折叠，含真实思考内容) ── */
 .thinking-block {
     background: var(--thinking-bg);
     border: 1px solid var(--thinking-border);
     border-radius: var(--radius);
-    margin-bottom: 8px;
+    margin-bottom: 0;
     overflow: hidden;
     animation: fade-in 0.3s ease;
 }
@@ -455,7 +477,7 @@ html, body {
     font-size: 13px;
     color: var(--thinking-text);
     font-style: italic;
-    line-height: 1.6;
+    line-height: 1.3;
     padding: 0 14px;
 }
 
@@ -472,15 +494,16 @@ html, body {
 
 /* ── Response Text ── */
 .response-text {
-    padding: 16px 20px;
+    padding: 10px 14px;
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     font-size: 14px;
-    line-height: 1.8;
+    line-height: 1.3;
     color: var(--text);
     white-space: pre-wrap;
-    word-break: break-word;
+    overflow-wrap: break-word;
+    word-break: keep-all;
 }
 
 /* 流式光标 */
@@ -501,7 +524,7 @@ html, body {
     display: flex;
     align-items: center;
     gap: 10px;
-    margin-top: 10px;
+    margin-top: 8px;
     padding: 0 4px;
 }
 
@@ -532,7 +555,7 @@ html, body {
 /* ── Markdown 渲染样式 ── */
 .response-text h2, .response-text h3, .response-text h4 {
     color: var(--accent);
-    margin: 14px 0 8px;
+    margin: 10px 0 6px;
     font-size: 15px;
 }
 .response-text h2 { font-size: 17px; }
@@ -540,8 +563,28 @@ html, body {
 .response-text h4 { font-size: 13px; }
 
 .response-text p {
-    margin: 8px 0;
-    line-height: 1.8;
+    margin: 2px 0;
+    line-height: 1.3;
+}
+
+/* 第一个元素不需要顶部间距 */
+.response-text > p:first-child,
+.response-text > h2:first-child,
+.response-text > h3:first-child,
+.response-text > h4:first-child,
+.response-text > ul:first-child,
+.response-text > ol:first-child {
+    margin-top: 0;
+}
+
+/* 最后一个元素不需要底部间距 */
+.response-text > p:last-child,
+.response-text > h2:last-child,
+.response-text > h3:last-child,
+.response-text > h4:last-child,
+.response-text > ul:last-child,
+.response-text > ol:last-child {
+    margin-bottom: 0;
 }
 
 .response-text strong {
@@ -555,7 +598,7 @@ html, body {
 }
 
 .response-text li {
-    margin-bottom: 6px;
+    margin-bottom: 4px;
     line-height: 1.6;
 }
 
@@ -573,7 +616,7 @@ html, body {
     background: #0d1117;
     border: 1px solid #30363d;
     border-radius: var(--radius);
-    margin: 12px 0;
+    margin: 8px 0;
     overflow: hidden;
 }
 
@@ -630,7 +673,7 @@ html, body {
     padding: 14px 16px;
     font-family: var(--font-mono);
     font-size: 13px;
-    line-height: 1.7;
+    line-height: 1.3;
     overflow-x: auto;
     background: #0d1117;
 }
@@ -872,7 +915,7 @@ html, body {
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
-    margin-bottom: 6px;
+    margin-bottom: 0;
     overflow: hidden;
     animation: fade-in 0.25s ease;
 }
@@ -959,7 +1002,8 @@ html, body {
     font-size: 12px;
     line-height: 1.5;
     white-space: pre-wrap;
-    word-break: break-all;
+    overflow-wrap: break-word;
+    word-break: keep-all;
     color: var(--text-secondary);
     background: var(--bg-secondary);
 }
@@ -972,7 +1016,8 @@ html, body {
     background: var(--bg-raised);
     border-bottom: 1px solid var(--border-subtle);
     white-space: pre-wrap;
-    word-break: break-all;
+    overflow-wrap: break-word;
+    word-break: keep-all;
 }
 .tool-detail-command .dollar {
     color: var(--text-dim);
@@ -985,7 +1030,8 @@ html, body {
     font-size: 12px;
     line-height: 1.5;
     white-space: pre-wrap;
-    word-break: break-all;
+    overflow-wrap: break-word;
+    word-break: keep-all;
     color: var(--text-secondary);
     background: var(--bg-secondary);
 }
@@ -1016,8 +1062,8 @@ html, body {
     background: #fffbf0;
     border: 1px solid #f0e0b0;
     border-radius: var(--radius);
-    padding: 16px;
-    margin-bottom: 8px;
+    padding: 14px;
+    margin-bottom: 0;
     animation: fade-in 0.3s ease;
 }
 
