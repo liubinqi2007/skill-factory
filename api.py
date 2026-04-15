@@ -498,6 +498,93 @@ async def get_messages(skill_id: str):
     ]
 
 
+# ─── Skill 文件浏览 ────────────────────────────────────────────
+
+# 文件浏览忽略的目录/文件前缀
+_FILE_TREE_IGNORE = {'.', '__pycache__', '.ruff_cache', 'node_modules'}
+
+
+def _build_file_tree(directory: Path, base: Path) -> list:
+    """递归构建文件树，返回 [{name, type, path, children?}]"""
+    items = []
+    try:
+        entries = sorted(directory.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower()))
+    except PermissionError:
+        return items
+    for entry in entries:
+        # 跳过隐藏文件和缓存目录
+        if any(entry.name.startswith(prefix) or entry.name == prefix
+               for prefix in _FILE_TREE_IGNORE):
+            continue
+        rel = str(entry.relative_to(base))
+        if entry.is_dir():
+            children = _build_file_tree(entry, base)
+            if children:  # 空目录不展示
+                items.append({"name": entry.name, "type": "dir", "path": rel, "children": children})
+        else:
+            items.append({"name": entry.name, "type": "file", "path": rel})
+    return items
+
+
+@api.get("/api/skills/{skill_id}/files")
+async def list_skill_files(skill_id: str):
+    skill = skill_manager.get_skill(skill_id)
+    if not skill:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    ws_path = Path(skill.workspace)
+    if not ws_path.exists():
+        return JSONResponse({"error": "workspace not found"}, status_code=404)
+    tree = _build_file_tree(ws_path, ws_path)
+    return {"tree": tree}
+
+
+@api.put("/api/skills/{skill_id}/files/content")
+async def save_skill_file_content(skill_id: str, request: Request):
+    skill = skill_manager.get_skill(skill_id)
+    if not skill:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    body = await request.json()
+    path = body.get("path", "")
+    content = body.get("content", "")
+    if not path:
+        return JSONResponse({"error": "path is required"}, status_code=400)
+    ws_path = Path(skill.workspace).resolve()
+    file_path = (ws_path / path).resolve()
+    if not str(file_path).startswith(str(ws_path)):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    if not file_path.is_file():
+        return JSONResponse({"error": "file not found"}, status_code=404)
+    try:
+        file_path.write_text(content, encoding="utf-8")
+        return {"saved": True, "path": path}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@api.get("/api/skills/{skill_id}/files/content")
+async def get_skill_file_content(skill_id: str, path: str = ""):
+    skill = skill_manager.get_skill(skill_id)
+    if not skill:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if not path:
+        return JSONResponse({"error": "path is required"}, status_code=400)
+    ws_path = Path(skill.workspace).resolve()
+    file_path = (ws_path / path).resolve()
+    # 安全检查：防止路径遍历
+    if not str(file_path).startswith(str(ws_path)):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    if not file_path.is_file():
+        return JSONResponse({"error": "file not found"}, status_code=404)
+    # 限制文件大小（1MB）
+    if file_path.stat().st_size > 1024 * 1024:
+        return JSONResponse({"error": "file too large"}, status_code=400)
+    try:
+        content = file_path.read_text(encoding="utf-8")
+        return {"path": path, "content": content, "name": file_path.name}
+    except UnicodeDecodeError:
+        return JSONResponse({"error": "binary file"}, status_code=400)
+
+
 # ─── 系统状态 ────────────────────────────────────────────────
 
 @api.get("/api/status")

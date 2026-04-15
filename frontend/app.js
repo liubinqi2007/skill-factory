@@ -163,6 +163,12 @@ function initApp() {
     // 重连按钮
     var reconnectBtn = document.getElementById('idleReconnectBtn');
     if (reconnectBtn) reconnectBtn.addEventListener('click', _idleReconnect);
+
+    // Tab 切换
+    var tabBtnChat = document.getElementById('tabBtnChat');
+    var tabBtnFiles = document.getElementById('tabBtnFiles');
+    if (tabBtnChat) tabBtnChat.addEventListener('click', function() { switchTab('chat'); });
+    if (tabBtnFiles) tabBtnFiles.addEventListener('click', function() { switchTab('files'); });
 }
 
 function autoResize() {
@@ -1283,11 +1289,19 @@ function selectSkill(skillId) {
     document.getElementById('emptyState').style.display = 'none';
     document.getElementById('chatArea').style.display = 'flex';
 
-    document.getElementById('skillName').textContent = skill.description || skill.name;
-
     var statusEl = document.getElementById('skillStatus');
     statusEl.textContent = statusLabel(skill.status);
     statusEl.className = 'chat-skill-status card-status-badge ' + skill.status;
+
+    // 关闭文件面板并重置
+    _activeTab = 'chat';
+    _filesLoaded = false;
+    _fileCache = {};
+    document.getElementById('tabBtnChat').classList.add('active');
+    document.getElementById('tabBtnFiles').classList.remove('active');
+    document.getElementById('tabChat').classList.add('active');
+    document.getElementById('tabFiles').classList.remove('active');
+    _resetPreview();
 
     renderSkillList();
 
@@ -1616,3 +1630,291 @@ function quickCreate() {
 }
 
 function escapeHtml(str) { var d = document.createElement('div'); d.textContent = str; return d.innerHTML; }
+
+// ── Tab 切换 ──────────────────────────────────────────────
+var _activeTab = 'chat';
+var _filesLoaded = false;
+
+function switchTab(tab) {
+    if (_activeTab === tab) return;
+    _activeTab = tab;
+
+    // 切换按钮高亮
+    document.getElementById('tabBtnChat').classList.toggle('active', tab === 'chat');
+    document.getElementById('tabBtnFiles').classList.toggle('active', tab === 'files');
+
+    // 切换页面
+    document.getElementById('tabChat').classList.toggle('active', tab === 'chat');
+    document.getElementById('tabFiles').classList.toggle('active', tab === 'files');
+
+    // 首次切换到文件 tab 时加载文件树
+    if (tab === 'files' && !_filesLoaded) {
+        _loadFileTree();
+    }
+}
+
+function _loadFileTree() {
+    if (!activeSkillId) return;
+    _fileCache = {};
+    _filesLoaded = true;
+    fetch('/api/skills/' + activeSkillId + '/files')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var treeEl = document.getElementById('fileTree');
+            treeEl.innerHTML = '';
+            if (data.tree && data.tree.length) {
+                _renderTreeNodes(data.tree, treeEl, 0);
+            } else {
+                treeEl.innerHTML = '<div class="file-tree-empty">暂无文件</div>';
+            }
+        })
+        .catch(function() {
+            document.getElementById('fileTree').innerHTML = '<div class="file-tree-empty">加载失败</div>';
+        });
+    _resetPreview();
+}
+
+function _resetPreview() {
+    document.getElementById('filePreviewEmpty').style.display = '';
+    var content = document.getElementById('filePreviewContent');
+    content.style.display = 'none';
+    content.innerHTML = '';
+}
+
+function _renderTreeNodes(nodes, parentEl, depth) {
+    for (var i = 0; i < nodes.length; i++) {
+        var node = nodes[i];
+        var item = document.createElement('div');
+        item.className = 'file-tree-item' + (node.type === 'dir' ? ' is-dir' : ' is-file');
+        item.style.paddingLeft = (12 + depth * 16) + 'px';
+
+        if (node.type === 'dir') {
+            item.innerHTML = '<span class="ft-arrow ft-arrow-closed">&#9656;</span>' +
+                '<span class="ft-icon ft-icon-dir">&#128193;</span>' +
+                '<span class="ft-name">' + escapeHtml(node.name) + '</span>';
+            item.setAttribute('data-expanded', 'false');
+            (function(itemEl, childNodes, d) {
+                itemEl.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    var expanded = itemEl.getAttribute('data-expanded') === 'true';
+                    if (expanded) {
+                        // 收起
+                        itemEl.setAttribute('data-expanded', 'false');
+                        itemEl.querySelector('.ft-arrow').className = 'ft-arrow ft-arrow-closed';
+                        var childContainer = itemEl.nextElementSibling;
+                        if (childContainer && childContainer.classList.contains('ft-children')) {
+                            childContainer.style.display = 'none';
+                        }
+                    } else {
+                        // 展开
+                        itemEl.setAttribute('data-expanded', 'true');
+                        itemEl.querySelector('.ft-arrow').className = 'ft-arrow ft-arrow-open';
+                        var existing = itemEl.nextElementSibling;
+                        if (existing && existing.classList.contains('ft-children')) {
+                            existing.style.display = '';
+                        } else {
+                            var container = document.createElement('div');
+                            container.className = 'ft-children';
+                            _renderTreeNodes(childNodes, container, d + 1);
+                            itemEl.parentNode.insertBefore(container, itemEl.nextSibling);
+                        }
+                    }
+                });
+            })(item, node.children || [], depth);
+        } else {
+            var ext = node.name.split('.').pop().toLowerCase();
+            var icon = _fileIcon(ext);
+            item.innerHTML = '<span class="ft-icon">' + icon + '</span>' +
+                '<span class="ft-name">' + escapeHtml(node.name) + '</span>';
+            item.setAttribute('data-path', node.path);
+            (function(itemEl, filePath) {
+                itemEl.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    // 高亮选中
+                    var allFiles = document.querySelectorAll('.file-tree-item.is-file.active');
+                    for (var j = 0; j < allFiles.length; j++) allFiles[j].classList.remove('active');
+                    itemEl.classList.add('active');
+                    _previewFile(filePath);
+                });
+            })(item, node.path);
+        }
+        parentEl.appendChild(item);
+    }
+}
+
+function _fileIcon(ext) {
+    var map = {
+        'md': '&#128196;', 'py': '&#128013;', 'js': '&#9889;',
+        'json': '&#128218;', 'txt': '&#128196;', 'yaml': '&#128218;',
+        'yml': '&#128218;', 'sh': '&#128187;', 'sql': '&#128451;',
+        'html': '&#127760;', 'css': '&#127912;'
+    };
+    return map[ext] || '&#128196;';
+}
+
+function _previewFile(filePath) {
+    if (!activeSkillId) return;
+
+    // 缓存命中
+    if (_fileCache[filePath]) {
+        _showPreview(filePath, _fileCache[filePath]);
+        return;
+    }
+
+    var previewContent = document.getElementById('filePreviewContent');
+    var previewEmpty = document.getElementById('filePreviewEmpty');
+    previewEmpty.style.display = 'none';
+    previewContent.style.display = '';
+    previewContent.innerHTML = '<div class="file-preview-loading">加载中...</div>';
+
+    fetch('/api/skills/' + activeSkillId + '/files/content?path=' + encodeURIComponent(filePath))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.error) {
+                previewContent.innerHTML = '<div class="file-preview-error">' + escapeHtml(data.error) + '</div>';
+                return;
+            }
+            _fileCache[filePath] = data;
+            _showPreview(filePath, data);
+        })
+        .catch(function() {
+            previewContent.innerHTML = '<div class="file-preview-error">加载失败</div>';
+        });
+}
+
+var _editingFile = null;  // 当前正在编辑的文件路径
+
+function _showPreview(filePath, data) {
+    _editingFile = null;  // 退出编辑模式
+    var previewEmpty = document.getElementById('filePreviewEmpty');
+    var previewContent = document.getElementById('filePreviewContent');
+    previewEmpty.style.display = 'none';
+    previewContent.style.display = '';
+
+    var ext = data.name ? data.name.split('.').pop().toLowerCase() : filePath.split('.').pop().toLowerCase();
+    var header = '<div class="file-preview-header">' +
+        '<span class="fp-name">' + _fileIcon(ext) + ' ' + escapeHtml(data.name || filePath) + '</span>' +
+        '<div class="fp-actions">' +
+            '<button class="fp-btn fp-btn-edit" id="btnEditFile" title="编辑">' +
+                '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>' +
+                '<span>编辑</span>' +
+            '</button>' +
+        '</div>' +
+        '</div>';
+
+    var body = '';
+    if (ext === 'md') {
+        body = '<div class="fp-md">' + renderMarkdown(data.content) + '</div>';
+    } else {
+        var lang = ext;
+        if (ext === 'py') lang = 'python';
+        body = '<pre class="fp-code"><code class="language-' + lang + '">' +
+            escapeHtml(data.content) + '</code></pre>';
+    }
+
+    previewContent.innerHTML = header + body;
+
+    // 触发 highlight.js
+    var codeBlocks = previewContent.querySelectorAll('pre code');
+    for (var i = 0; i < codeBlocks.length; i++) {
+        hljs.highlightElement(codeBlocks[i]);
+    }
+
+    // 绑定编辑按钮
+    var editBtn = document.getElementById('btnEditFile');
+    if (editBtn) {
+        editBtn.addEventListener('click', function() {
+            _enterEditMode(filePath, data);
+        });
+    }
+}
+
+function _enterEditMode(filePath, data) {
+    _editingFile = filePath;
+    var previewEmpty = document.getElementById('filePreviewEmpty');
+    var previewContent = document.getElementById('filePreviewContent');
+    previewEmpty.style.display = 'none';
+    previewContent.style.display = '';
+
+    var ext = data.name ? data.name.split('.').pop().toLowerCase() : filePath.split('.').pop().toLowerCase();
+    var header = '<div class="file-preview-header">' +
+        '<span class="fp-name">' + _fileIcon(ext) + ' ' + escapeHtml(data.name || filePath) + '</span>' +
+        '<div class="fp-actions">' +
+            '<button class="fp-btn fp-btn-save" id="btnSaveFile" title="保存">' +
+                '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>' +
+                '<span>保存</span>' +
+            '</button>' +
+            '<button class="fp-btn fp-btn-cancel" id="btnCancelEdit" title="取消">' +
+                '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>' +
+                '<span>取消</span>' +
+            '</button>' +
+        '</div>' +
+        '</div>';
+
+    var body = '<div class="fp-editor-wrap"><textarea class="fp-editor" id="fpEditor" spellcheck="false">' +
+        escapeHtml(data.content) + '</textarea></div>';
+
+    previewContent.innerHTML = header + body;
+
+    // 绑定保存和取消按钮
+    var saveBtn = document.getElementById('btnSaveFile');
+    var cancelBtn = document.getElementById('btnCancelEdit');
+    if (saveBtn) {
+        saveBtn.addEventListener('click', function() {
+            _saveFile(filePath, data);
+        });
+    }
+    if (cancelBtn) {
+        cancelBtn.addEventListener('click', function() {
+            // 恢复到预览模式
+            _showPreview(filePath, data);
+        });
+    }
+
+    // 聚焦编辑器
+    var editor = document.getElementById('fpEditor');
+    if (editor) editor.focus();
+}
+
+function _saveFile(filePath, data) {
+    var editor = document.getElementById('fpEditor');
+    if (!editor) return;
+
+    var newContent = editor.value;
+    var saveBtn = document.getElementById('btnSaveFile');
+    if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.querySelector('span').textContent = '保存中...';
+    }
+
+    fetch('/api/skills/' + activeSkillId + '/files/content', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: filePath, content: newContent })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(result) {
+        if (result.error) {
+            saveBtn.disabled = false;
+            saveBtn.querySelector('span').textContent = '保存失败';
+            setTimeout(function() {
+                saveBtn.querySelector('span').textContent = '保存';
+            }, 2000);
+            return;
+        }
+        // 更新缓存
+        data.content = newContent;
+        _fileCache[filePath] = data;
+        // 切回预览模式
+        _showPreview(filePath, data);
+    })
+    .catch(function() {
+        if (saveBtn) {
+            saveBtn.disabled = false;
+            saveBtn.querySelector('span').textContent = '保存失败';
+            setTimeout(function() {
+                saveBtn.querySelector('span').textContent = '保存';
+            }, 2000);
+        }
+    });
+}

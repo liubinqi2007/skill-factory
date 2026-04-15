@@ -6,7 +6,7 @@
     <title>Skill Factory</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Noto+Sans+SC:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=19">
+    <link rel="stylesheet" href="/static/style.css?v=20">
     <!-- Highlight.js for code syntax highlighting -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
@@ -56,18 +56,38 @@
             <!-- 聊天区 -->
             <div class="chat-area" id="chatArea" style="display:none">
                 <div class="chat-header" id="chatHeader">
-                    <div class="chat-header-left">
-                        <span class="chat-skill-name" id="skillName">-</span>
-                        <span class="chat-skill-status" id="skillStatus">-</span>
+                    <span class="chat-skill-status" id="skillStatus">-</span>
+                    <div class="tab-bar">
+                        <button class="tab-btn active" id="tabBtnChat" data-tab="chat">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                            对话
+                        </button>
+                        <button class="tab-btn" id="tabBtnFiles" data-tab="files">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                            文件
+                        </button>
                     </div>
                 </div>
-                <div class="messages" id="messages"></div>
-                <div class="input-area">
-                    <div class="input-wrapper">
-                        <textarea id="chatInput" placeholder="描述你想要的修改..." rows="1"></textarea>
-                        <button class="send-btn" id="sendBtn" title="发送">
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-                        </button>
+                <!-- Tab: 对话 -->
+                <div class="tab-page active" id="tabChat">
+                    <div class="messages" id="messages"></div>
+                    <div class="input-area">
+                        <div class="input-wrapper">
+                            <textarea id="chatInput" placeholder="描述你想要的修改..." rows="1"></textarea>
+                            <button class="send-btn" id="sendBtn" title="发送">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <!-- Tab: 文件 -->
+                <div class="tab-page" id="tabFiles">
+                    <div class="file-panel">
+                        <div class="file-panel-tree" id="fileTree"></div>
+                        <div class="file-panel-preview" id="filePreview">
+                            <div class="file-preview-empty" id="filePreviewEmpty">点击左侧文件预览内容</div>
+                            <div class="file-preview-content" id="filePreviewContent" style="display:none"></div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -86,6 +106,6 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=19"></script>
+    <script src="/static/app.js?v=20"></script>
 </body>
 </html>
