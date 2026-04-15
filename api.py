@@ -490,6 +490,7 @@ async def get_messages(skill_id: str):
             "content": m.content,
             "thinking": m.thinking,
             "tool_details": m.tool_details,
+            "content_parts": m.content_parts,
             "timestamp": m.timestamp.isoformat(),
         }
         for m in messages

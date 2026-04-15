@@ -214,6 +214,8 @@ function connectWS(skillId) {
 
 // ── 消息渲染状态 ──
 var currentResponse = null;
+var currentRoundIndex = null;  // 当前渲染的轮次索引
+var roundContainers = {};      // round_index -> DOM element
 var _streamingTimeout = null;
 var STREAMING_IDLE_TIMEOUT = 90000;  // 90 秒无数据自动结束流式
 
@@ -245,12 +247,16 @@ function _clearStreamingTimeout() {
 function handleWSMessage(data) {
     // 收到任何流式数据时重置超时
     if (data.type === 'status' || data.type === 'text' || data.type === 'thinking' ||
-        data.type === 'tool_status' || data.type === 'tool_detail' || data.type === 'stream_resume') {
+        data.type === 'tool_status' || data.type === 'tool_detail' || data.type === 'stream_resume' ||
+        data.type === 'thinking_round_start') {
         _resetStreamingTimeout();
     }
 
     if (data.type === 'status') {
         handleStatus(data);
+    }
+    else if (data.type === 'thinking_round_start') {
+        handleThinkingRoundStart(data);
     }
     else if (data.type === 'tool_status') {
         handleToolStatus(data);
@@ -295,10 +301,98 @@ function ensureResponse() {
         thinkingText: '',
         textEl: null,
         textContent: '',
-        toolBar: null
+        toolBar: null,
+        rounds: []  // 存储各轮次的 DOM 容器
     };
 
     return currentResponse;
+}
+
+// 获取或创建当前轮次的容器
+function ensureRound(resp, roundIndex) {
+    if (!resp) return null;
+
+    // 如果轮次索引与当前相同，直接使用现有容器
+    if (currentRoundIndex === roundIndex && resp.currentRound) {
+        return resp.currentRound;
+    }
+
+    // 完成上一轮（如果有）
+    if (resp.currentRound) {
+        finishRound(resp.currentRound);
+    }
+
+    // 创建新轮次容器
+    var roundEl = document.createElement('div');
+    roundEl.className = 'round-container';
+    roundEl.setAttribute('data-round-index', roundIndex);
+
+    // 添加到响应容器中（在分隔线之前，如果有）
+    var divider = resp.container.querySelector('.response-divider');
+    if (divider) {
+        resp.container.insertBefore(roundEl, divider);
+    } else {
+        resp.container.appendChild(roundEl);
+    }
+
+    // 更新当前轮次状态
+    currentRoundIndex = roundIndex;
+    resp.currentRound = roundEl;
+    resp.rounds.push(roundEl);
+
+    return roundEl;
+}
+
+// 完成一轮的渲染（折叠思考块等）
+function finishRound(roundEl) {
+    if (!roundEl) return;
+
+    // 折叠所有未折叠的思考块
+    var openBlocks = roundEl.querySelectorAll('.thinking-block.open');
+    for (var i = 0; i < openBlocks.length; i++) {
+        openBlocks[i].classList.remove('open');
+        openBlocks[i].classList.add('closed');
+        var label = openBlocks[i].querySelector('.thinking-label');
+        if (label) label.textContent = '思考过程';
+    }
+
+    // 移除该轮次思考块的 spinner
+    var spinners = roundEl.querySelectorAll('.thinking-spinner');
+    for (var j = 0; j < spinners.length; j++) {
+        spinners[j].remove();
+    }
+}
+
+// 处理新轮次开始
+function handleThinkingRoundStart(data) {
+    var resp = ensureResponse();
+    var roundIndex = data.round_index || 1;
+
+    // 完成上一轮（如果有），开始新轮次
+    var roundEl = ensureRound(resp, roundIndex);
+
+    // 移除加载指示器
+    removeLoadingIndicator(resp);
+
+    // 创建新轮次的思考块
+    createThinkingBlockForRound(roundEl);
+
+    scrollToBottom();
+}
+
+function createThinkingBlockForRound(roundEl) {
+    var block = document.createElement('div');
+    block.className = 'thinking-block open';
+    block.innerHTML =
+        '<div class="thinking-header" onclick="this.parentElement.classList.toggle(\'open\');this.parentElement.classList.toggle(\'closed\')">' +
+            '<svg class="thinking-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>' +
+            '<span class="thinking-label">思考中</span>' +
+            '<span class="thinking-spinner"></span>' +
+            '<svg class="thinking-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>' +
+        '</div>' +
+        '<div class="thinking-body"></div>';
+    roundEl.appendChild(block);
+    return block;
 }
 
 function handleStatus(data) {
@@ -307,12 +401,11 @@ function handleStatus(data) {
     var isThinking = content.indexOf('思考') >= 0 || content.indexOf('thinking') >= 0;
 
     if (isThinking) {
-        // 如果已有思考块且正在输出文本，先折叠旧的
-        if (resp.indicator && resp.textContent) {
-            finishThinkingBlock(resp);
+        // 如果没有当前轮次，创建第一轮
+        if (!resp.currentRound) {
+            var roundEl = ensureRound(resp, 1);
+            createThinkingBlockForRound(roundEl);
         }
-        // 每次新思考创建新的块
-        createThinkingBlock(resp);
     }
 
     // 更新或创建加载指示器
@@ -503,15 +596,19 @@ function handleToolDetail(data) {
     var card = buildToolDetailCard(data);
     if (!card) return;
 
-    // 插入到 toolBar 之后、textEl 之前
-    if (resp.toolBar && resp.toolBar.parentNode === resp.container) {
-        var nextSibling = resp.toolBar.nextSibling;
-        while (nextSibling && nextSibling !== resp.textEl) {
-            nextSibling = nextSibling.nextSibling;
-        }
-        resp.container.insertBefore(card, nextSibling || null);
+    var roundIndex = data.round_index || 1;
+    var roundEl = ensureRound(resp, roundIndex);
+
+    // 将工具详情卡片插入到正确位置：思考块之后，文本区域之前
+    var textEl = roundEl.querySelector('.response-text');
+    var questionCard = roundEl.querySelector('.question-card');
+
+    if (textEl) {
+        roundEl.insertBefore(card, textEl);
+    } else if (questionCard) {
+        roundEl.insertBefore(card, questionCard);
     } else {
-        resp.container.appendChild(card);
+        roundEl.appendChild(card);
     }
 
     scrollToBottom();
@@ -543,9 +640,19 @@ function handleQuestion(data) {
     var requestId = data.request_id || '';
     var questions = data.questions || [];
 
-    // 折叠当前思考块
-    finishThinkingBlock(resp);
     removeCursor();
+
+    var roundIndex = data.round_index || 1;
+    var roundEl = ensureRound(resp, roundIndex);
+
+    // 折叠当前轮次的思考块
+    var thinkingBlock = roundEl.querySelector('.thinking-block.open');
+    if (thinkingBlock) {
+        thinkingBlock.classList.remove('open');
+        thinkingBlock.classList.add('closed');
+        var label = thinkingBlock.querySelector('.thinking-label');
+        if (label) label.textContent = '思考过程';
+    }
 
     // 创建问题卡片
     var card = document.createElement('div');
@@ -616,11 +723,19 @@ function handleQuestion(data) {
         card.appendChild(block);
     }
 
-    // 插入到容器中（在 text 区域之前）
-    if (resp.textEl && resp.textEl.parentNode === resp.container) {
-        resp.container.insertBefore(card, resp.textEl);
+    // 将问题卡片插入到正确位置：文本区域之后（如果有）
+    var textEl = roundEl.querySelector('.response-text');
+    if (textEl) {
+        // 在文本区域之后插入
+        var nextSibling = textEl.nextSibling;
+        if (nextSibling) {
+            roundEl.insertBefore(card, nextSibling);
+        } else {
+            roundEl.appendChild(card);
+        }
     } else {
-        resp.container.appendChild(card);
+        // 没有文本区域，添加到末尾
+        roundEl.appendChild(card);
     }
 
     document.getElementById('sendBtn').disabled = false;
@@ -743,15 +858,22 @@ function handleThinking(data) {
     var resp = ensureResponse();
     // 移除加载指示器
     removeLoadingIndicator(resp);
-    // 如果没有活跃的思考块，创建一个
-    if (!resp.indicator) {
-        createThinkingBlock(resp);
+
+    var roundIndex = data.round_index || 1;
+    var roundEl = ensureRound(resp, roundIndex);
+
+    // 查找当前轮次的思考块
+    var thinkingBlock = roundEl.querySelector('.thinking-block');
+
+    // 如果没有思考块，创建一个（兼容没有 thinking_round_start 的情况）
+    if (!thinkingBlock) {
+        thinkingBlock = createThinkingBlockForRound(roundEl);
     }
 
-    resp.thinkingText += data.content || '';
-
-    var body = resp.indicator.querySelector('.thinking-body');
-    body.textContent = resp.thinkingText;
+    // 更新思考内容
+    var body = thinkingBlock.querySelector('.thinking-body');
+    var currentContent = body.textContent || '';
+    body.textContent = currentContent + (data.content || '');
     body.scrollTop = body.scrollHeight;
     scrollToBottom();
 }
@@ -761,26 +883,46 @@ function handleText(data) {
 
     // 移除加载指示器
     removeLoadingIndicator(resp);
-    // 折叠并结束当前思考块
-    finishThinkingBlock(resp);
 
-    // 创建文本区域
-    if (!resp.textEl) {
-        var textBlock = document.createElement('div');
-        textBlock.className = 'response-text';
-        resp.container.appendChild(textBlock);
-        resp.textEl = textBlock;
+    var roundIndex = data.round_index || 1;
+    var roundEl = ensureRound(resp, roundIndex);
+
+    // 折叠当前轮次的思考块
+    var thinkingBlock = roundEl.querySelector('.thinking-block.open');
+    if (thinkingBlock) {
+        thinkingBlock.classList.remove('open');
+        thinkingBlock.classList.add('closed');
+        var label = thinkingBlock.querySelector('.thinking-label');
+        if (label) label.textContent = '思考过程';
     }
 
-    resp.textContent += data.content;
-    resp.textEl.innerHTML = renderMarkdown(resp.textContent);
+    // 查找或创建当前轮次的文本区域
+    var textEl = roundEl.querySelector('.response-text');
+    if (!textEl) {
+        textEl = document.createElement('div');
+        textEl.className = 'response-text';
+
+        // 将文本区域插入到正确位置：所有工具详情之后，问题卡片之前
+        var questionCard = roundEl.querySelector('.question-card');
+        if (questionCard) {
+            roundEl.insertBefore(textEl, questionCard);
+        } else {
+            roundEl.appendChild(textEl);
+        }
+    }
+
+    // 获取当前文本内容
+    var currentContent = textEl.getAttribute('data-raw-content') || '';
+    currentContent += data.content;
+    textEl.setAttribute('data-raw-content', currentContent);
+    textEl.innerHTML = renderMarkdown(currentContent);
 
     // 添加流式光标
     removeCursor();
     var cursor = document.createElement('span');
     cursor.className = 'streaming-cursor';
     cursor.textContent = '▊';
-    resp.textEl.appendChild(cursor);
+    textEl.appendChild(cursor);
 
     scrollToBottom();
 }
@@ -792,36 +934,35 @@ function handleDone(data) {
 
     // 移除加载指示器
     removeLoadingIndicator(resp);
-    // 折叠并结束当前思考块
-    finishThinkingBlock(resp);
-    // 确保所有思考块的 spinner 都停止
-    var allSpinners = resp.container.querySelectorAll('.thinking-spinner');
-    for (var i = 0; i < allSpinners.length; i++) {
-        allSpinners[i].remove();
+
+    // 完成所有轮次
+    for (var i = 0; i < resp.rounds.length; i++) {
+        finishRound(resp.rounds[i]);
     }
-    // 确保所有未折叠的思考块都折叠
-    var openBlocks = resp.container.querySelectorAll('.thinking-block.open');
-    for (var j = 0; j < openBlocks.length; j++) {
-        openBlocks[j].classList.remove('open');
-        openBlocks[j].classList.add('closed');
-        var lbl = openBlocks[j].querySelector('.thinking-label');
-        if (lbl) lbl.textContent = '思考过程';
+
+    // 完成当前轮次（如果有）
+    if (resp.currentRound) {
+        finishRound(resp.currentRound);
     }
 
     // 移除光标
     removeCursor();
 
-    // 渲染最终 markdown
-    if (resp.textEl && resp.textContent) {
-        resp.textEl.innerHTML = renderMarkdown(resp.textContent);
-    }
-
     // 移除 streaming 状态
     resp.container.classList.remove('streaming');
     resp.container.classList.add('complete');
 
-    // 添加完成分隔线
-    if (resp.textContent) {
+    // 添加完成分隔线（检查是否有文本内容）
+    var hasTextContent = false;
+    for (var j = 0; j < resp.rounds.length; j++) {
+        var textEl = resp.rounds[j].querySelector('.response-text');
+        if (textEl && textEl.getAttribute('data-raw-content')) {
+            hasTextContent = true;
+            break;
+        }
+    }
+
+    if (hasTextContent) {
         var divider = document.createElement('div');
         divider.className = 'response-divider';
         divider.innerHTML = '<div class="divider-line"></div>' +
@@ -832,6 +973,8 @@ function handleDone(data) {
 
     // 重置状态
     currentResponse = null;
+    currentRoundIndex = null;
+    roundContainers = {};
     restoreSendBtn();
     loadSkills().then(renderSkillList);
     scrollToBottom();
@@ -882,19 +1025,41 @@ function handleStreamResume(data) {
         var spinners = lastAssistant.querySelectorAll('.thinking-spinner');
         for (var si = 0; si < spinners.length; si++) { spinners[si].remove(); }
 
+        // 恢复轮次状态
+        var roundEls = lastAssistant.querySelectorAll('.round-container');
+        var rounds = [];
+        var maxRoundIndex = 0;
+
+        for (var ri = 0; ri < roundEls.length; ri++) {
+            var ridx = parseInt(roundEls[ri].getAttribute('data-round-index')) || 1;
+            if (ridx > maxRoundIndex) maxRoundIndex = ridx;
+            rounds.push(roundEls[ri]);
+        }
+
         // 设置 currentResponse 指向此元素
-        var textEl = lastAssistant.querySelector('.response-text');
         currentResponse = {
             container: lastAssistant,
             indicator: null,
             thinkingText: data.thinking || '',
-            textEl: textEl,
+            textEl: lastAssistant.querySelector('.response-text'),
             textContent: data.content || '',
-            toolBar: lastAssistant.querySelector('.tool-status-bar')
+            toolBar: lastAssistant.querySelector('.tool-status-bar'),
+            rounds: rounds,
+            currentRound: rounds.length > 0 ? rounds[rounds.length - 1] : null
         };
+
+        // 设置当前轮次索引
+        currentRoundIndex = maxRoundIndex;
+        roundContainers = {};
+        for (var rj = 0; rj < rounds.length; rj++) {
+            var ridx2 = parseInt(rounds[rj].getAttribute('data-round-index')) || 1;
+            roundContainers[ridx2] = rounds[rj];
+        }
     } else {
         // 没有已有消息，创建新的流式元素
         currentResponse = null;
+        currentRoundIndex = null;
+        roundContainers = {};
         ensureResponse();
     }
 
@@ -1136,7 +1301,12 @@ function selectSkill(skillId) {
             if (msgs[i].role === 'user') {
                 appendUserMessage(msgs[i].content);
             } else {
-                appendAssistantHistory(msgs[i].content, msgs[i].thinking || '', msgs[i].tool_details || []);
+                appendAssistantHistory(
+                    msgs[i].content,
+                    msgs[i].thinking || '',
+                    msgs[i].tool_details || [],
+                    msgs[i].content_parts || []
+                );
             }
         }
         scrollToBottom();
@@ -1268,22 +1438,84 @@ function _buildHistoryQuestionCard(data, allToolDetails) {
     return card;
 }
 
-function appendAssistantHistory(content, thinking, toolDetails) {
+function appendAssistantHistory(content, thinking, toolDetails, contentParts) {
     var messagesEl = document.getElementById('messages');
     var container = document.createElement('div');
     container.className = 'ai-response complete';
 
-    // 渲染思考块（如果有），按轮次分隔符拆分为多个块
-    if (thinking && thinking.trim()) {
-        var rounds = thinking.split('\n\n===THINKING_ROUND===\n\n');
-        for (var ri = 0; ri < rounds.length; ri++) {
-            var roundText = rounds[ri].trim();
-            if (!roundText) continue;
+    // 按 content_parts 组织轮次（如果有）
+    var roundsMap = {};
 
+    // 如果有 content_parts，按 round_index 组织
+    if (contentParts && contentParts.length > 0) {
+        for (var pi = 0; pi < contentParts.length; pi++) {
+            var part = contentParts[pi];
+            var ridx = part.round_index || 1;
+            if (!roundsMap[ridx]) {
+                roundsMap[ridx] = {
+                    thinking: '',
+                    tools: [],
+                    text: ''
+                };
+            }
+            if (part.content) {
+                roundsMap[ridx].text += part.content;
+            }
+        }
+    }
+
+    // 如果没有 content_parts，使用整个 content 作为第一轮
+    if (Object.keys(roundsMap).length === 0) {
+        roundsMap[1] = {
+            thinking: thinking || '',
+            tools: toolDetails || [],
+            text: content || ''
+        };
+    } else {
+        // 有 content_parts 时，需要组织 thinking 和 toolDetails
+        // thinking 按分隔符拆分
+        var thinkingRounds = [];
+        if (thinking && thinking.trim()) {
+            thinkingRounds = thinking.split('\n\n===THINKING_ROUND===\n\n');
+        }
+
+        // toolDetails 按 round_index 分组
+        for (var ti = 0; ti < toolDetails.length; ti++) {
+            var td = toolDetails[ti];
+            var tridx = td.round_index || 1;
+            if (!roundsMap[tridx]) {
+                roundsMap[tridx] = { thinking: '', tools: [], text: '' };
+            }
+            roundsMap[tridx].tools.push(td);
+        }
+
+        // 将 thinking 分配到各轮
+        var ridxKeys = Object.keys(roundsMap).map(Number).sort(function(a, b) { return a - b; });
+        for (var ri = 0; ri < ridxKeys.length; ri++) {
+            var ridx = ridxKeys[ri];
+            if (thinkingRounds[ri]) {
+                roundsMap[ridx].thinking = thinkingRounds[ri].trim();
+            }
+        }
+    }
+
+    // 按轮次渲染
+    var ridxKeys = Object.keys(roundsMap).map(Number).sort(function(a, b) { return a - b; });
+    for (var ri = 0; ri < ridxKeys.length; ri++) {
+        var ridx = ridxKeys[ri];
+        var roundData = roundsMap[ridx];
+
+        // 创建轮次容器
+        var roundEl = document.createElement('div');
+        roundEl.className = 'round-container';
+        roundEl.setAttribute('data-round-index', ridx);
+
+        // 渲染思考块
+        if (roundData.thinking && roundData.thinking.trim()) {
             var block = document.createElement('div');
             block.className = 'thinking-block closed';
-            var label = rounds.length > 1
-                ? '思考过程 (第 ' + (ri + 1) + '/' + rounds.length + ' 轮)'
+            var label = ridxKeys.length > 1
+                ? '思考过程 (第 ' + ridx + ' 轮)'
                 : '思考过程';
             block.innerHTML =
                 '<div class="thinking-header" onclick="this.parentElement.classList.toggle(\'open\');this.parentElement.classList.toggle(\'closed\')">' +
@@ -1292,34 +1524,58 @@ function appendAssistantHistory(content, thinking, toolDetails) {
                     '<svg class="thinking-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>' +
                 '</div>' +
                 '<div class="thinking-body"></div>';
-            block.querySelector('.thinking-body').textContent = roundText;
-            container.appendChild(block);
+            block.querySelector('.thinking-body').textContent = roundData.thinking;
+            roundEl.appendChild(block);
         }
-    }
 
-    // 渲染工具详情和 question（从历史恢复）
-    if (toolDetails && toolDetails.length > 0) {
-        for (var ti = 0; ti < toolDetails.length; ti++) {
-            var fakeData = toolDetails[ti];
-            if (fakeData.type === 'question') {
-                // 渲染 question 卡片，传入完整 toolDetails 以检测是否已回答
-                var qCard = _buildHistoryQuestionCard(fakeData, toolDetails);
-                if (qCard) container.appendChild(qCard);
-            } else {
-                // 渲染普通工具详情
-                var detailCard = buildToolDetailCard(fakeData);
-                if (detailCard) container.appendChild(detailCard);
+        // 渲染工具详情和 question，确保顺序：思考 → 工具 → 文本 → 问题
+        if (roundData.tools && roundData.tools.length > 0) {
+            // 分离工具详情和问题卡片
+            var detailCards = [];
+            var questionCards = [];
+
+            for (var ti = 0; ti < roundData.tools.length; ti++) {
+                var fakeData = roundData.tools[ti];
+                if (fakeData.type === 'question') {
+                    var qCard = _buildHistoryQuestionCard(fakeData, roundData.tools);
+                    if (qCard) questionCards.push(qCard);
+                } else {
+                    var detailCard = buildToolDetailCard(fakeData);
+                    if (detailCard) detailCards.push(detailCard);
+                }
+            }
+
+            // 先添加工具详情
+            for (var di = 0; di < detailCards.length; di++) {
+                roundEl.appendChild(detailCards[di]);
+            }
+
+            // 再添加文本
+            if (roundData.text && roundData.text.trim()) {
+                var textBlock = document.createElement('div');
+                textBlock.className = 'response-text';
+                textBlock.innerHTML = renderMarkdown(roundData.text);
+                roundEl.appendChild(textBlock);
+            }
+
+            // 最后添加问题卡片
+            for (var qi = 0; qi < questionCards.length; qi++) {
+                roundEl.appendChild(questionCards[qi]);
+            }
+        } else {
+            // 没有工具详情时，直接渲染文本
+            if (roundData.text && roundData.text.trim()) {
+                var textBlock = document.createElement('div');
+                textBlock.className = 'response-text';
+                textBlock.innerHTML = renderMarkdown(roundData.text);
+                roundEl.appendChild(textBlock);
             }
         }
+
+        container.appendChild(roundEl);
     }
 
-    // 渲染正文
-    var textBlock = document.createElement('div');
-    textBlock.className = 'response-text';
-    textBlock.innerHTML = renderMarkdown(content);
-    container.appendChild(textBlock);
-
-    // 判断是否为进行中的对话（creating/iterating 状态不显示"回复完成"）
+    // 判断是否为进行中的对话
     var isActive = true;
     for (var si = 0; si < skills.length; si++) {
         if (skills[si].id === activeSkillId) {
@@ -1331,7 +1587,6 @@ function appendAssistantHistory(content, thinking, toolDetails) {
     }
 
     if (isActive) {
-        // 已完成：显示分隔线
         container.classList.add('complete');
         var divider = document.createElement('div');
         divider.className = 'response-divider';
@@ -1340,8 +1595,6 @@ function appendAssistantHistory(content, thinking, toolDetails) {
             '<div class="divider-line"></div>';
         container.appendChild(divider);
     }
-    // 进行中的对话：不加分隔线，不加 complete 类
-    // stream_resume 或 WS chunks 会处理后续状态
 
     messagesEl.appendChild(container);
     scrollToBottom();

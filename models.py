@@ -26,6 +26,7 @@ class Message(BaseModel):
     content: str
     thinking: str = ""  # 思考内容（仅 assistant 消息）
     tool_details: list[dict] = Field(default_factory=list)  # 工具执行详情
+    content_parts: list[dict] = Field(default_factory=list)  # 按轮次的文本片段 [{"round_index": 1, "content": "..."}]
     timestamp: datetime = Field(default_factory=datetime.now)
 
 

@@ -89,6 +89,7 @@ class SkillManager:
                 "content": m.content,
                 "thinking": m.thinking,
                 "tool_details": m.tool_details,
+                "content_parts": m.content_parts,
                 "timestamp": _dt_to_str(m.timestamp),
             }
             for m in skill.messages
@@ -131,6 +132,7 @@ class SkillManager:
                         content=m["content"],
                         thinking=m.get("thinking", ""),
                         tool_details=m.get("tool_details", []),
+                        content_parts=m.get("content_parts", []),
                         timestamp=_str_to_dt(m["timestamp"]),
                     ))
 
@@ -251,9 +253,12 @@ class SkillManager:
         self._streaming[skill_id] = {"msg_idx": msg_idx}
 
         full_response = ""
+        full_response_round_index = 0  # 记录当前文本属于哪一轮
         full_thinking = ""
         full_tool_details: list[dict] = []
+        content_parts: list[dict] = []  # 按轮次的文本片段
         thinking_has_content = False
+        round_index = 0  # 当前轮次
         last_save_time = time.monotonic()
         SAVE_INTERVAL = 1.0  # 每 1 秒增量保存
 
@@ -264,32 +269,50 @@ class SkillManager:
                 if chunk.get("type") == "text":
                     full_response += chunk.get("content", "")
                     streaming_msg.content = full_response
+                    # 追加到 content_parts（合并同一轮的文本）
+                    if content_parts and content_parts[-1]["round_index"] == full_response_round_index:
+                        content_parts[-1]["content"] += chunk.get("content", "")
+                    else:
+                        content_parts.append({"round_index": full_response_round_index, "content": chunk.get("content", "")})
+                    streaming_msg.content_parts = list(content_parts)
+                    chunk["round_index"] = full_response_round_index
                     yield chunk
                 elif chunk.get("type") == "thinking_round_start":
                     if full_thinking and thinking_has_content:
                         full_thinking += THINKING_ROUND_SEP
                     thinking_has_content = False
+                    round_index += 1
+                    full_response_round_index = round_index
+                    chunk["round_index"] = round_index
+                    yield chunk
                 elif chunk.get("type") == "thinking":
                     full_thinking += chunk.get("content", "")
                     thinking_has_content = True
                     streaming_msg.thinking = full_thinking
+                    chunk["round_index"] = round_index
                     yield chunk
                 elif chunk.get("type") == "question":
                     # 保存 question 数据到 tool_details，以便刷新后恢复
-                    full_tool_details.append({
+                    q_detail = {
                         "type": "question",
                         "request_id": chunk.get("request_id", ""),
                         "questions": chunk.get("questions", []),
-                    })
+                        "round_index": round_index,
+                    }
+                    full_tool_details.append(q_detail)
                     streaming_msg.tool_details = list(full_tool_details)
+                    chunk["round_index"] = round_index
                     yield chunk
                 elif chunk.get("type") == "tool_status":
+                    chunk["round_index"] = round_index
                     yield chunk
                 elif chunk.get("type") == "tool_detail":
+                    chunk["round_index"] = round_index
                     full_tool_details.append(chunk)
                     streaming_msg.tool_details = list(full_tool_details)
                     yield chunk
                 elif chunk.get("type") == "status":
+                    chunk["round_index"] = round_index
                     yield chunk
                 elif chunk.get("type") == "error":
                     streaming_msg.content = full_response
@@ -391,6 +414,8 @@ class SkillManager:
         print(f"[Chat] Streaming: port={port}, session={session_id}", flush=True)
 
         full_text = ""
+        round_index = 0  # SSE 方式的轮次索引
+        full_response_round_index = 0  # 记录当前文本属于哪一轮
 
         # Fix 2: SSE 活动超时，120 秒无事件则断开（heartbeat 每 10 秒一次保活）
         SSE_INACTIVITY_TIMEOUT = 120
@@ -472,6 +497,7 @@ class SkillManager:
                             "request_id": q_id,
                             "session_id": session_id,
                             "questions": questions,
+                            "round_index": round_index,
                         }
                         print(f"[Chat] Question asked: id={q_id}, {len(questions)} questions", flush=True)
                         continue
@@ -486,7 +512,9 @@ class SkillManager:
                             part_types[part_id] = part_type
 
                         if part_type == "step-start":
-                            yield {"type": "thinking_round_start"}
+                            round_index += 1
+                            full_response_round_index = round_index
+                            yield {"type": "thinking_round_start", "round_index": round_index}
                             yield {"type": "status", "content": "思考中"}
                         elif part_type == "tool-use" or part_type == "tool":
                             tool_name = part.get("name", part.get("tool", ""))
@@ -514,6 +542,7 @@ class SkillManager:
                                         "content": content,
                                         "isNew": not metadata.get("exists", True),
                                         "title": title,
+                                        "round_index": round_index,
                                     }
                                 elif tn == "bash":
                                     cmd = tool_input.get("command", "")
@@ -527,6 +556,7 @@ class SkillManager:
                                         "output": out,
                                         "exitCode": metadata.get("exit", 0),
                                         "title": title,
+                                        "round_index": round_index,
                                     }
                                 elif tn == "read":
                                     yield {
@@ -534,6 +564,7 @@ class SkillManager:
                                         "tool": "read",
                                         "filePath": tool_input.get("filePath", ""),
                                         "title": title,
+                                        "round_index": round_index,
                                     }
                                 elif tn == "edit":
                                     filediff = metadata.get("filediff", {})
@@ -545,6 +576,7 @@ class SkillManager:
                                         "additions": filediff.get("additions", 0),
                                         "deletions": filediff.get("deletions", 0),
                                         "title": title,
+                                        "round_index": round_index,
                                     }
                                 else:
                                     # 其他工具通用详情
@@ -554,6 +586,7 @@ class SkillManager:
                                             "tool": tool_name,
                                             "output": output[:500],
                                             "title": title,
+                                            "round_index": round_index,
                                         }
 
                             elif tool_status == "running":
@@ -580,17 +613,17 @@ class SkillManager:
                         if resolved_type == "text":
                             full_text += delta
                             print(f"[Chat] Delta (text, id={part_id[:8] if part_id else '?'}): {len(delta)} chars", flush=True)
-                            yield {"type": "text", "content": delta}
+                            yield {"type": "text", "content": delta, "round_index": full_response_round_index}
                         elif resolved_type == "reasoning":
                             print(f"[Chat] Delta (reasoning, id={part_id[:8] if part_id else '?'}): {len(delta)} chars → thinking", flush=True)
-                            yield {"type": "thinking", "content": delta}
+                            yield {"type": "thinking", "content": delta, "round_index": round_index}
                         else:
                             # partID 未知时用 field 判断：field="text" → text
                             field = properties.get("field", "")
                             if field == "text":
                                 full_text += delta
                                 print(f"[Chat] Delta (field=text, id={part_id[:8] if part_id else '?'}): {len(delta)} chars", flush=True)
-                                yield {"type": "text", "content": delta}
+                                yield {"type": "text", "content": delta, "round_index": full_response_round_index}
                             else:
                                 print(f"[Chat] Delta (unknown, field={field}): {len(delta)} chars → skip", flush=True)
 
