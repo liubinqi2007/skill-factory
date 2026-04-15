@@ -314,6 +314,8 @@ class SkillManager:
                 elif chunk.get("type") == "status":
                     chunk["round_index"] = round_index
                     yield chunk
+                elif chunk.get("type") == "heartbeat":
+                    yield chunk
                 elif chunk.get("type") == "error":
                     # OpenCode 错误不输出给前端，只记录日志
                     logger.error("OpenCode error: %s", chunk.get("content", ""))
@@ -484,6 +486,7 @@ class SkillManager:
 
                     if evt_type == "server.heartbeat":
                         last_event_time = time.monotonic()
+                        yield {"type": "heartbeat"}
                         continue
 
                     # ── question.asked 事件：AI 向用户提问 ──

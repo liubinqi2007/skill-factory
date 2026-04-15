@@ -223,7 +223,7 @@ var currentResponse = null;
 var currentRoundIndex = null;  // 当前渲染的轮次索引
 var roundContainers = {};      // round_index -> DOM element
 var _streamingTimeout = null;
-var STREAMING_IDLE_TIMEOUT = 90000;  // 90 秒无数据自动结束流式
+var STREAMING_IDLE_TIMEOUT = 300000;  // 5 分钟无数据自动结束流式
 
 function _hasPendingQuestion() {
     return !!document.querySelector('.question-card:not(.question-answered)');
@@ -254,7 +254,7 @@ function handleWSMessage(data) {
     // 收到任何流式数据时重置超时
     if (data.type === 'status' || data.type === 'text' || data.type === 'thinking' ||
         data.type === 'tool_status' || data.type === 'tool_detail' || data.type === 'stream_resume' ||
-        data.type === 'thinking_round_start') {
+        data.type === 'thinking_round_start' || data.type === 'heartbeat') {
         _resetStreamingTimeout();
     }
 
@@ -290,6 +290,9 @@ function handleWSMessage(data) {
     }
     else if (data.type === 'stream_resume') {
         handleStreamResume(data);
+    }
+    else if (data.type === 'heartbeat') {
+        // 保活心跳，仅用于重置流式超时计时器
     }
 }
 
