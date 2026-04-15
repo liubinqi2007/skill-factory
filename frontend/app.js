@@ -3,6 +3,7 @@
 var skills = [];
 var activeSkillId = null;
 var ws = null;
+var _isStreaming = false;
 
 // ── 空闲检测 ──
 var WS_IDLE_THRESHOLD = 5 * 60 * 1000;   // 5分钟WS无数据流，进入空闲警戒
@@ -268,6 +269,9 @@ function handleWSMessage(data) {
     }
     else if (data.type === 'done') {
         handleDone(data);
+    }
+    else if (data.type === 'stopped') {
+        console.log('Server confirmed stop');
     }
     else if (data.type === 'error') {
         handleError(data);
@@ -828,7 +832,7 @@ function handleDone(data) {
 
     // 重置状态
     currentResponse = null;
-    document.getElementById('sendBtn').disabled = false;
+    restoreSendBtn();
     loadSkills().then(renderSkillList);
     scrollToBottom();
 }
@@ -848,7 +852,7 @@ function handleError(data) {
     messagesEl.appendChild(el);
 
     currentResponse = null;
-    document.getElementById('sendBtn').disabled = false;
+    restoreSendBtn();
     scrollToBottom();
 }
 
@@ -1003,6 +1007,10 @@ function loadMessages(skillId) {
 
 // ── Send Message ───────────────────────────────────
 function sendMessage() {
+    if (_isStreaming) {
+        stopGeneration();
+        return;
+    }
     var ta = document.getElementById('chatInput');
     if (!ta || !activeSkillId) return;
     var text = ta.value.trim();
@@ -1027,13 +1035,42 @@ function doSend(text) {
     var ta = document.getElementById('chatInput');
     ta.value = '';
     ta.style.height = 'auto';
-    document.getElementById('sendBtn').disabled = true;
 
     appendUserMessage(text);
     currentResponse = null;
+    _isStreaming = true;
+
+    var btn = document.getElementById('sendBtn');
+    btn.disabled = false;
+    btn.className = 'send-btn stop-btn';
+    btn.title = '停止生成';
+    btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>';
+    btn.onclick = function(e) { e.preventDefault(); stopGeneration(); };
 
     ws.send(JSON.stringify({ message: text }));
-    _onWsActivity();  // 发送消息，重置WS空闲计时
+    _onWsActivity();
+}
+
+function restoreSendBtn() {
+    var btn = document.getElementById('sendBtn');
+    btn.className = 'send-btn';
+    btn.title = '发送';
+    btn.disabled = false;
+    btn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>';
+    btn.onclick = function() { sendMessage(); };
+    _isStreaming = false;
+}
+
+function stopGeneration() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: 'stop' }));
+    _onWsActivity();
+    _clearStreamingTimeout();
+    if (currentResponse) {
+        currentResponse.container.remove();
+        currentResponse = null;
+    }
+    restoreSendBtn();
 }
 
 // ── Render ─────────────────────────────────────────

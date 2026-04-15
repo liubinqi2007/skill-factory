@@ -205,6 +205,20 @@ class SkillManager:
             return skill.messages[msg_idx]
         return None
 
+    def discard_last_turn(self, skill_id: str) -> None:
+        """用户主动终止输出，删除最后一轮的 user + assistant 消息并恢复状态。"""
+        skill = self._skills.get(skill_id)
+        if not skill:
+            return
+        if skill.messages and skill.messages[-1].role == MessageRole.ASSISTANT:
+            skill.messages.pop()
+        if skill.messages and skill.messages[-1].role == MessageRole.USER:
+            skill.messages.pop()
+        skill.status = SkillStatus.ACTIVE
+        self._streaming.pop(skill_id, None)
+        self._save_skill(skill)
+        print(f"[Manager] Discarded last turn for skill_id={skill_id}", flush=True)
+
     async def chat_stream(self, skill_id: str, user_message: str):
         skill = self._skills.get(skill_id)
         if not skill:

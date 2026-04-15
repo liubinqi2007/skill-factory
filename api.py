@@ -294,20 +294,60 @@ async def ws_chat(websocket: WebSocket, skill_id: str):
             _stream_contexts[skill_id] = ctx
             ctx.task = asyncio.create_task(_run_stream(skill_id, initial_msg, ctx))
 
-            # 从队列转发 chunks 到 WS
-            try:
-                while True:
-                    chunk = await ctx.queue.get()
+            # 从队列转发 chunks 到 WS（同时监听 question_reply / stop）
+            # 使用单协程同时监听 queue 和 websocket，避免任务取消导致 ws 状态异常
+            while True:
+                # 同时等待 queue chunk 和 websocket 消息
+                queue_task = asyncio.create_task(ctx.queue.get())
+                ws_task = asyncio.create_task(websocket.receive_json())
+                done, pending = await asyncio.wait(
+                    [queue_task, ws_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                # 取消未完成的任务
+                for t in pending:
+                    t.cancel()
+                    try:
+                        await t
+                    except (asyncio.CancelledError, Exception):
+                        pass
+
+                # 处理完成的任务
+                if queue_task in done:
+                    chunk = queue_task.result()
                     if chunk is None:
+                        # 流式完成，标记 ctx 并清理
+                        ctx.done = True
+                        _stream_contexts.pop(skill_id, None)
+                        print(f"[WS] Auto-send stream done for skill_id={skill_id}", flush=True)
                         break
                     if chunk.get("type") == "question":
                         await _handle_question(websocket, skill_id, chunk)
                     else:
                         await _safe_send(websocket, chunk)
-            except WebSocketDisconnect:
-                # WS 断开但 worker 继续运行，内容持久化到磁盘
-                print(f"[WS] Disconnected, stream worker continues: skill_id={skill_id}", flush=True)
-                return  # WS断开才退出
+
+                elif ws_task in done:
+                    data = ws_task.result()
+                    if data.get("type") == "question_reply":
+                        request_id = data.get("request_id", "")
+                        answers = data.get("answers", [])
+                        if request_id:
+                            await skill_manager.reply_question(skill_id, request_id, answers)
+                    elif data.get("type") == "stop":
+                        # 用户主动停止
+                        queue_task.cancel()
+                        ctx.task.cancel()
+                        try:
+                            await ctx.task
+                        except asyncio.CancelledError:
+                            pass
+                        skill_manager.discard_last_turn(skill_id)
+                        await _safe_send(websocket, {"type": "done", "content": "", "skill_id": skill_id})
+                        ctx.done = True
+                        _stream_contexts.pop(skill_id, None)
+                        raise WebSocketDisconnect()  # 退出自动发送模式
+
+            # 自动发送完成后，继续正常的消息循环
 
         elif has_assistant or skill_id in _auto_sending:
             print(f"[WS] Skill already has response or being processed, skipping auto-send", flush=True)
@@ -352,20 +392,63 @@ async def ws_chat(websocket: WebSocket, skill_id: str):
             _stream_contexts[skill_id] = ctx
             ctx.task = asyncio.create_task(_run_stream(skill_id, user_message, ctx))
 
-            # 从队列转发 chunks 到 WS
-            try:
-                while True:
-                    chunk = await ctx.queue.get()
+            # 从队列转发 chunks 到 WS（同时监听 question_reply / stop）
+            # 使用单协程同时监听 queue 和 websocket，避免任务取消导致 ws 状态异常
+            while True:
+                # 同时等待 queue chunk 和 websocket 消息
+                queue_task = asyncio.create_task(ctx.queue.get())
+                ws_task = asyncio.create_task(websocket.receive_json())
+                done, pending = await asyncio.wait(
+                    [queue_task, ws_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                # 取消未完成的任务
+                for t in pending:
+                    t.cancel()
+                    try:
+                        await t
+                    except (asyncio.CancelledError, Exception):
+                        pass
+
+                # 处理完成的任务
+                if queue_task in done:
+                    chunk = queue_task.result()
                     if chunk is None:
+                        # 流式完成，标记 ctx 并清理
+                        ctx.done = True
+                        _stream_contexts.pop(skill_id, None)
+                        print(f"[WS] Stream done for skill_id={skill_id}", flush=True)
                         break
                     if chunk.get("type") == "question":
                         await _handle_question(websocket, skill_id, chunk)
                     else:
                         await _safe_send(websocket, chunk)
-            except WebSocketDisconnect:
-                print(f"[WS] Disconnected during manual send, stream continues: skill_id={skill_id}", flush=True)
-                return  # 只有WS断开才退出
-            # 流式完成后不退出，继续等待下一条消息
+                    # ws_task 被取消，需要手动消费掉它可能预取的消息（如果有）
+                    # 但 asyncio.wait 已经处理了，这里继续循环即可
+
+                elif ws_task in done:
+                    data = ws_task.result()
+                    if data.get("type") == "question_reply":
+                        request_id = data.get("request_id", "")
+                        answers = data.get("answers", [])
+                        if request_id:
+                            await skill_manager.reply_question(skill_id, request_id, answers)
+                    elif data.get("type") == "stop":
+                        # 用户主动停止
+                        queue_task.cancel()
+                        ctx.task.cancel()
+                        try:
+                            await ctx.task
+                        except asyncio.CancelledError:
+                            pass
+                        skill_manager.discard_last_turn(skill_id)
+                        await _safe_send(websocket, {"type": "done", "content": "", "skill_id": skill_id})
+                        ctx.done = True
+                        _stream_contexts.pop(skill_id, None)
+                        break
+                    # queue_task 被取消，但 queue.get() 没有副作用，直接继续循环即可
+
+            # 流式完成后不退出，继续等待下一条消息（回到外层 while True）
 
     except WebSocketDisconnect:
         print(f"[WS] Disconnected: skill_id={skill_id}", flush=True)
