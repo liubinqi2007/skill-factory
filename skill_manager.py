@@ -315,12 +315,15 @@ class SkillManager:
                     chunk["round_index"] = round_index
                     yield chunk
                 elif chunk.get("type") == "error":
+                    # OpenCode 错误不输出给前端，只记录日志
+                    logger.error("OpenCode error: %s", chunk.get("content", ""))
                     streaming_msg.content = full_response
                     streaming_msg.thinking = full_thinking
                     streaming_msg.tool_details = list(full_tool_details)
                     self._save_messages_only(skill)
                     self._streaming.pop(skill_id, None)
-                    yield chunk
+                    # 静默结束，不发送错误给前端
+                    yield {"type": "done", "content": "", "skill_id": skill.id}
                     return
 
                 # 增量保存（节流）
@@ -347,7 +350,8 @@ class SkillManager:
             streaming_msg.tool_details = list(full_tool_details)
             self._save_messages_only(skill)
             self._streaming.pop(skill_id, None)
-            yield {"type": "error", "content": f"流式读取错误: {e}"}
+            # OpenCode 错误不输出给前端，只记录日志
+            yield {"type": "done", "content": "", "skill_id": skill.id}
             return
 
         # 流式完成，最终保存
@@ -392,7 +396,8 @@ class SkillManager:
 
         server = server_pool.get_by_skill(skill.id)
         if not server:
-            yield {"type": "error", "content": "OpenCode 实例未启动"}
+            logger.error("OpenCode instance not started for skill_id=%s", skill.id)
+            yield {"type": "done", "content": "", "skill_id": skill.id}
             return
 
         prompt = self._build_prompt(skill, user_message)
@@ -407,7 +412,8 @@ class SkillManager:
                 session_id = r.json()["id"]
             print(f"[Chat] New session created: {session_id}", flush=True)
         except Exception as e:
-            yield {"type": "error", "content": f"创建 session 失败: {e}"}
+            logger.error("Failed to create session: %s", e)
+            yield {"type": "done", "content": "", "skill_id": skill.id}
             return
 
         yield {"type": "status", "content": "正在生成..."}
@@ -435,7 +441,8 @@ class SkillManager:
                 print(f"[Chat] SSE connected, status={response.status_code}", flush=True)
 
                 if response.status_code != 200:
-                    yield {"type": "error", "content": f"SSE 连接失败: {response.status_code}"}
+                    logger.error("SSE connection failed: status=%d", response.status_code)
+                    yield {"type": "done", "content": "", "skill_id": skill.id}
                     return
 
                 print(f"[Chat] Sending prompt_async...", flush=True)
@@ -446,7 +453,8 @@ class SkillManager:
                     )
                     print(f"[Chat] prompt_async response: {r.status_code}", flush=True)
                     if r.status_code != 204:
-                        yield {"type": "error", "content": f"prompt_async 返回 {r.status_code}"}
+                        logger.error("prompt_async failed: status=%d", r.status_code)
+                        yield {"type": "done", "content": "", "skill_id": skill.id}
                         return
 
                 # 按 part_id 追踪每个 part 的类型，避免多 part 并行时错乱
@@ -638,16 +646,17 @@ class SkillManager:
                 print(f"[Chat] SSE closed, got {len(full_text)} chars", flush=True)
             else:
                 logger.error("SSE closed without data: %s", e)
-                yield {"type": "error", "content": f"SSE 连接错误: {e}"}
+                yield {"type": "done", "content": "", "skill_id": skill.id}
         except httpx.TimeoutException:
             if full_text:
                 print(f"[Chat] SSE timeout but got {len(full_text)} chars", flush=True)
             else:
-                yield {"type": "error", "content": "OpenCode 响应超时"}
+                logger.error("SSE timeout without data")
+                yield {"type": "done", "content": "", "skill_id": skill.id}
         except Exception as e:
             logger.error("Stream error: %s", e, exc_info=True)
             if not full_text:
-                yield {"type": "error", "content": f"通信错误: {e}"}
+                yield {"type": "done", "content": "", "skill_id": skill.id}
         finally:
             await sse_client.aclose()
 

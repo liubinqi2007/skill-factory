@@ -275,7 +275,8 @@ async def ws_chat(websocket: WebSocket, skill_id: str):
 
     server = await server_pool.start(skill_id, workspace)
     if not server:
-        await _safe_send(websocket, {"type": "error", "content": "AI 助手启动失败，可能并发数已满（最多3个）"})
+        # OpenCode 启动失败不输出给前端，只记录日志
+        print(f"[WS] OpenCode start failed: skill_id={skill_id}", flush=True)
         await websocket.close()
         return
 
